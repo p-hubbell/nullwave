@@ -4,3 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+nw-core = { path = "../nw-core" }
+serde.workspace = true
+ron.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
