@@ -241,7 +241,10 @@ pub fn load_project(dir: &Path) -> Result<(Project, Vec<LoadWarning>), LoadError
             let rel = DocPath::Notes(entry.id.clone(), id.clone()).relative_path();
             let abs = dir.join(&rel);
             known.insert(abs.clone());
-            if !abs.exists() {
+            let exists = abs
+                .try_exists()
+                .map_err(|e| LoadError::Io { path: rel.clone(), message: e.to_string() })?;
+            if !exists {
                 continue;
             }
             let file: NoteFile = read_doc(dir, &rel)?;

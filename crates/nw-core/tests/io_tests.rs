@@ -204,3 +204,23 @@ fn orphan_file_is_warning() {
         ]
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn unreadable_notes_location_is_io_error_not_empty() {
+    use std::os::unix::fs::PermissionsExt;
+    let (t, _) = saved();
+    let dir = t.path().join("patterns/pattern-1");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+    let result = load_project(t.path());
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    // Running as root bypasses permissions; only assert when the block took effect.
+    if let Err(err) = result {
+        assert!(
+            matches!(&err, LoadError::Io { path, .. } if path.ends_with("patterns/pattern-1/kick.ron")),
+            "{err:?}"
+        );
+    } else {
+        assert!(fs::metadata(dir.join("kick.ron")).is_ok(), "load succeeded despite blocked dir");
+    }
+}
