@@ -5,9 +5,12 @@ edition.workspace = true
 
 [dependencies]
 basedrop.workspace = true
+nw-core = { path = "../nw-core" }
+rtrb.workspace = true
 symphonia = { workspace = true, features = ["wav", "aiff", "flac", "mp3", "ogg", "vorbis", "pcm"] }
 thiserror.workspace = true
 
 [dev-dependencies]
+assert_no_alloc.workspace = true
 hound = "3"
 tempfile = "3"
