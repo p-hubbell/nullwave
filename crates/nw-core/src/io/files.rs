@@ -77,14 +77,14 @@ pub fn hash_bytes(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
-fn to_ron<T: Serialize>(value: &T) -> String {
+pub(crate) fn to_ron<T: Serialize>(value: &T) -> String {
     let config = ron::ser::PrettyConfig::new().depth_limit(4).struct_names(false);
     let mut s = ron::ser::to_string_pretty(value, config).expect("model types serialize to RON");
     s.push('\n');
     s
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
