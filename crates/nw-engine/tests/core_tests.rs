@@ -350,3 +350,26 @@ fn preview_plays_and_stops() {
     assert!(out.iter().all(|x| *x == 0.0));
     assert_eq!(core.active_voices(), 0);
 }
+
+#[test]
+fn snapshot_swap_keeps_pending_event_with_fractional_spt() {
+    // 128 BPM at 48 kHz: 23.4375 samples per tick. Tick 100 fires at frame
+    // ceil(2343.75) = 2344, so a 2344-frame block ends with the position just
+    // past tick 100 but the event not yet fired.
+    let c = Collector::new();
+    let sample = dc(&c, 100_000);
+    let make = || snap(&c, 128.0, 3840, vec![inst(Some(sample.clone()), 0.0)], vec![ev(100, 96)]);
+    let mut core = EngineCore::new(RATE, make());
+    core.handle(Command::Play);
+    let out = render(&mut core, 2344, 2344);
+    assert!(out.iter().all(|x| *x == 0.0));
+    core.handle(Command::SetSnapshot(make()));
+    let out = render(&mut core, 64, 64);
+    assert_ne!(out[0], 0.0, "pending note must fire at frame 0 of the next block");
+
+    // Without a swap, the same note fires at the same frame.
+    let mut core = EngineCore::new(RATE, make());
+    core.handle(Command::Play);
+    let out = render(&mut core, 2400, 2400);
+    assert_eq!(first_nonzero(&out), Some(2344));
+}

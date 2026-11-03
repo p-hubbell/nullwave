@@ -69,10 +69,12 @@ impl EngineCore {
     pub fn handle(&mut self, command: Command) {
         match command {
             Command::SetSnapshot(snapshot) => {
+                // Events already fired were scheduled at the old tempo.
+                let fired_spt = self.samples_per_tick();
                 // The old snapshot's drop is deferred to the basedrop collector.
                 self.snapshot = snapshot;
                 self.position %= f64::from(self.loop_length());
-                self.cursor = self.cursor_for(self.position);
+                self.cursor = self.cursor_for(self.position, fired_spt);
             }
             Command::Play => {
                 self.playing = true;
@@ -148,9 +150,16 @@ impl EngineCore {
         (f64::from(ms.max(0.0)) * f64::from(self.output_rate) / 1000.0) as u32
     }
 
-    /// First event at or after `position`.
-    fn cursor_for(&self, position: f64) -> usize {
-        self.snapshot.events.partition_point(|e| f64::from(e.tick) < position)
+    /// First event not yet fired at `position`. Matches the firing rule in
+    /// `render_chunk`: an event fires on the first frame where `frames_until` is 0,
+    /// and the position then advances at least one frame. So an event counts as
+    /// fired only once the position is a full frame past its tick; one that is
+    /// less than a frame behind is still pending (possible when samples-per-tick
+    /// is fractional and a block ends exactly at its firing frame).
+    fn cursor_for(&self, position: f64, spt: f64) -> usize {
+        self.snapshot
+            .events
+            .partition_point(|e| (position - f64::from(e.tick)) * spt >= 1.0 - FRAME_EPSILON)
     }
 
     /// Frames from the current position until `tick` is reached (0 if already reached).
