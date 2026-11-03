@@ -4,3 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+basedrop.workspace = true
+symphonia = { workspace = true, features = ["wav", "aiff", "flac", "mp3", "ogg", "vorbis", "pcm"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+hound = "3"
+tempfile = "3"
