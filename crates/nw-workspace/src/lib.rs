@@ -11,3 +11,4 @@ pub use commands::*;
 pub use palette::*;
 pub use browser::*;
 pub use settings::*;
+pub mod piano_roll;
