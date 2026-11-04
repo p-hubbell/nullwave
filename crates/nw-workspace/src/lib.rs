@@ -1,3 +1,6 @@
+mod fsutil;
+pub mod browser;
+pub mod settings;
 pub mod dirty;
 pub mod tabs;
 pub use dirty::*;
@@ -6,3 +9,5 @@ pub mod commands;
 pub mod palette;
 pub use commands::*;
 pub use palette::*;
+pub use browser::*;
+pub use settings::*;

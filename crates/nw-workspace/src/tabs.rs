@@ -218,11 +218,7 @@ pub fn save_workspace(dir: &Path, state: &WorkspaceState) -> io::Result<()> {
     std::fs::create_dir_all(&folder)?;
     let text = ron::ser::to_string_pretty(state, ron::ser::PrettyConfig::new())
         .map_err(io::Error::other)?;
-    let tmp = folder.join("workspace.ron.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, folder.join("workspace.ron")).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
+    crate::fsutil::write_atomic(&folder.join("workspace.ron"), &text)
 }
 
 pub fn load_workspace(dir: &Path, project: &Project) -> WorkspaceState {
