@@ -5,12 +5,14 @@ use gpui::{
     App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, ScrollHandle, Subscription,
     Window, div, prelude::*, px,
 };
-use nw_workspace::{SidebarView, WorkspaceState};
+use nw_core::PatternId;
+use nw_workspace::{SidebarView, TabKind, WorkspaceState};
 
-use crate::actions::{edit, project, transport, workspace};
+use crate::actions::{edit, instrument, pattern, project, transport, workspace};
 use crate::app_state::AppState;
 use crate::theme;
 use crate::ui::components::{TextField, TextFieldEvent};
+use crate::ui::instrument_tab::SliderDrag;
 use crate::ui::sidebar::SidebarState;
 use crate::ui::{bottom_panel, editor_area, sidebar, status_bar};
 
@@ -36,6 +38,11 @@ pub struct Shell {
     pub log_scroll: ScrollHandle,
     log_len: usize,
     tempo_subscription: Option<Subscription>,
+    /// The pattern being renamed inline in the sidebar, and its field.
+    pub pattern_rename: Option<(PatternId, Entity<TextField>)>,
+    rename_subscription: Option<Subscription>,
+    /// An instrument-tab slider drag in progress.
+    pub slider: Option<SliderDrag>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -57,6 +64,9 @@ impl Shell {
             log_scroll: ScrollHandle::new(),
             log_len: 0,
             tempo_subscription: None,
+            pattern_rename: None,
+            rename_subscription: None,
+            slider: None,
             _subscriptions: subscriptions,
         };
         if shell.state.read(cx).workspace.sidebar_view == SidebarView::Search {
@@ -160,6 +170,53 @@ impl Shell {
         cx.notify();
     }
 
+    /// Replaces the pattern's sidebar row with a text field holding its name.
+    pub fn begin_pattern_rename(&mut self, id: PatternId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.state.read(cx).project.pattern(&id).map(|p| p.name.clone()) else { return };
+        self.show_view(SidebarView::Project, window, cx);
+        let field = cx.new(|cx| TextField::new(name, "pattern name", |c| !c.is_control(), window, cx));
+        self.rename_subscription = Some(cx.subscribe_in(&field, window, Self::on_rename_event));
+        window.focus(&field.focus_handle(cx));
+        self.pattern_rename = Some((id, field));
+        cx.notify();
+    }
+
+    fn on_rename_event(
+        &mut self,
+        field: &Entity<TextField>,
+        event: &TextFieldEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let commit = match event {
+            TextFieldEvent::Changed => return,
+            TextFieldEvent::Submit | TextFieldEvent::Blur => true,
+            TextFieldEvent::Cancel => false,
+        };
+        if commit {
+            let name = field.read(cx).text().to_string();
+            if let Some((id, _)) = &self.pattern_rename {
+                let id = id.clone();
+                // `rename_pattern` ignores empty and unchanged names.
+                self.state.update(cx, |s, cx| s.rename_pattern(&id, &name, cx));
+            }
+        }
+        self.pattern_rename = None;
+        self.rename_subscription = None;
+        if !matches!(event, TextFieldEvent::Blur) {
+            window.focus(&self.focus_handle);
+        }
+        cx.notify();
+    }
+
+    /// The instrument of the active tab (a sampler tab or a piano roll).
+    fn active_instrument(&self, cx: &App) -> Option<nw_core::InstrumentId> {
+        match self.state.read(cx).workspace.active_tab()? {
+            TabKind::Instrument(i) | TabKind::PianoRoll(_, i) => Some(i.clone()),
+            TabKind::Pattern(_) => None,
+        }
+    }
+
     pub fn refresh_search_index(&mut self, cx: &mut Context<Self>) {
         let folders = self.state.read(cx).settings.sample_folders.clone();
         self.sidebar.refresh_index(folders, cx);
@@ -218,8 +275,32 @@ impl Shell {
     fn save_project(&mut self, _: &project::Save, _: &mut Window, cx: &mut Context<Self>) {
         self.log(cx, "Saving is not available yet");
     }
-    fn new_pattern(&mut self, _: &project::NewPattern, _: &mut Window, cx: &mut Context<Self>) {
-        self.state.update(cx, |s, cx| s.new_pattern(cx));
+    fn new_pattern(&mut self, _: &project::NewPattern, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_pattern(window, cx);
+    }
+    /// Adds a pattern, opens its rack and starts renaming it in the sidebar.
+    pub fn create_pattern(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.state.update(cx, |s, cx| s.new_pattern(cx)) {
+            self.begin_pattern_rename(id, window, cx);
+        }
+    }
+    fn rename_pattern(&mut self, _: &pattern::Rename, window: &mut Window, cx: &mut Context<Self>) {
+        match self.state.read(cx).workspace.active_pattern() {
+            Some(id) => self.begin_pattern_rename(id, window, cx),
+            None => self.log(cx, "Rename Pattern: open a pattern first"),
+        }
+    }
+    fn delete_pattern(&mut self, _: &pattern::Delete, _: &mut Window, cx: &mut Context<Self>) {
+        match self.state.read(cx).workspace.active_pattern() {
+            Some(id) => self.state.update(cx, |s, cx| s.delete_pattern(&id, cx)),
+            None => self.log(cx, "Delete Pattern: open a pattern first"),
+        }
+    }
+    fn delete_instrument(&mut self, _: &instrument::Delete, _: &mut Window, cx: &mut Context<Self>) {
+        match self.active_instrument(cx) {
+            Some(id) => self.state.update(cx, |s, cx| s.delete_instrument(&id, cx)),
+            None => self.log(cx, "Delete Instrument: open an instrument or piano roll first"),
+        }
     }
     fn add_sample_folder(&mut self, _: &project::AddSampleFolder, _: &mut Window, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| s.add_sample_folder(cx));
@@ -296,6 +377,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::open_project))
             .on_action(cx.listener(Self::save_project))
             .on_action(cx.listener(Self::new_pattern))
+            .on_action(cx.listener(Self::rename_pattern))
+            .on_action(cx.listener(Self::delete_pattern))
+            .on_action(cx.listener(Self::delete_instrument))
             .on_action(cx.listener(Self::add_sample_folder))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))

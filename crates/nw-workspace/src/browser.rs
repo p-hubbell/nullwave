@@ -12,7 +12,8 @@ pub struct BrowserEntry {
     pub is_dir: bool,
 }
 
-fn is_audio(path: &Path) -> bool {
+/// Whether `path` has one of `AUDIO_EXTENSIONS` (case-insensitive).
+pub fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| AUDIO_EXTENSIONS.iter().any(|a| a.eq_ignore_ascii_case(e)))

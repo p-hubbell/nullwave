@@ -12,6 +12,7 @@ use nw_workspace::{
 use crate::app_state::AppState;
 use crate::theme;
 use crate::ui::components::{dim_line, list_row, section_header};
+use crate::ui::pattern_tab::{SampleDrag, SampleDragView};
 use crate::ui::shell::Shell;
 
 const MAX_SEARCH_RESULTS: usize = 200;
@@ -116,7 +117,7 @@ pub fn render(shell: &Shell, width: f32, cx: &Context<Shell>) -> impl IntoElemen
     let mut rows: Vec<AnyElement> = Vec::new();
     match state.workspace.sidebar_view {
         SidebarView::Project => {
-            project_section(shell, state, &mut rows);
+            project_section(shell, state, cx, &mut rows);
             rows.push(section_header("presets").into_any_element());
             rows.push(dim_line("available when the mixer arrives", 1).into_any_element());
             sample_folders_section(shell, state, cx, &mut rows);
@@ -137,7 +138,7 @@ pub fn render(shell: &Shell, width: f32, cx: &Context<Shell>) -> impl IntoElemen
         .children(rows)
 }
 
-fn project_section(shell: &Shell, state: &AppState, rows: &mut Vec<AnyElement>) {
+fn project_section(shell: &Shell, state: &AppState, cx: &Context<Shell>, rows: &mut Vec<AnyElement>) {
     let Some(dir) = &state.project_dir else {
         rows.push(section_header("project").into_any_element());
         rows.push(dim_line("No project open", 1).into_any_element());
@@ -150,21 +151,29 @@ fn project_section(shell: &Shell, state: &AppState, rows: &mut Vec<AnyElement>) 
     for pattern in &state.project.patterns {
         let tab = TabKind::Pattern(pattern.id.clone());
         let selected = active.as_ref() == Some(&tab);
-        let state_entity = shell.state.clone();
+        let row_id = SharedString::from(format!("pattern:{}", pattern.id.0));
+        if let Some((_, field)) = shell.pattern_rename.as_ref().filter(|(id, _)| id == &pattern.id) {
+            rows.push(list_row(row_id, 1, selected).child(div().flex_1().child(field.clone())).into_any_element());
+            continue;
+        }
+        let id = pattern.id.clone();
         rows.push(
-            list_row(SharedString::from(format!("pattern:{}", pattern.id.0)), 1, selected)
-                .on_click(move |_, _, cx| {
-                    state_entity.update(cx, |s, cx| s.open_tab(tab.clone(), cx));
-                })
+            list_row(row_id, 1, selected)
+                .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, window, cx| {
+                    shell.state.update(cx, |s, cx| s.open_tab(tab.clone(), cx));
+                    // Double-click renames, like `pattern.rename`.
+                    if event.click_count() == 2 {
+                        shell.begin_pattern_rename(id.clone(), window, cx);
+                    }
+                }))
                 .child(pattern.name.clone())
                 .into_any_element(),
         );
     }
-    let state_entity = shell.state.clone();
     rows.push(
         list_row("new-pattern", 1, false)
             .text_color(theme::text_muted())
-            .on_click(move |_, _, cx| state_entity.update(cx, |s, cx| s.new_pattern(cx)))
+            .on_click(cx.listener(|shell, _, window, cx| shell.create_pattern(window, cx)))
             .child("+ new pattern")
             .into_any_element(),
     );
@@ -224,8 +233,15 @@ fn folder_rows(
                 if entry.is_dir {
                     folder_rows(shell, &entry.path, entry.name.clone(), depth + 1, cx, rows);
                 } else {
+                    let drag = SampleDrag { path: entry.path.clone(), name: entry.name.clone().into() };
+                    let preview_path = entry.path.clone();
+                    let state = shell.state.clone();
                     rows.push(
                         list_row(SharedString::from(format!("file:{}", entry.path.display())), depth + 2, false)
+                            .on_click(move |_, _, cx| {
+                                state.update(cx, |s, cx| s.preview_sample(preview_path.clone(), cx));
+                            })
+                            .on_drag(drag, |drag, grab, _, cx| cx.new(|_| SampleDragView::new(drag, grab)))
                             .child(entry.name.clone())
                             .into_any_element(),
                     );

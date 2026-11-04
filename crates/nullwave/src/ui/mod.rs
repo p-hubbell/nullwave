@@ -3,6 +3,8 @@
 pub mod bottom_panel;
 pub mod components;
 pub mod editor_area;
+pub mod instrument_tab;
+pub mod pattern_tab;
 pub mod shell;
 pub mod sidebar;
 pub mod status_bar;

@@ -5,9 +5,10 @@ use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
 use nw_workspace::{TabKind, tab_title};
 
 use crate::actions::project;
-use crate::app_state::{AppState, SampleStatus};
+use crate::app_state::AppState;
 use crate::theme;
 use crate::ui::components::button;
+use crate::ui::{instrument_tab, pattern_tab};
 use crate::ui::shell::Shell;
 
 pub fn render(shell: &Shell, cx: &Context<Shell>) -> AnyElement {
@@ -16,7 +17,7 @@ pub fn render(shell: &Shell, cx: &Context<Shell>) -> AnyElement {
     if state.project_dir.is_none() {
         return area.child(no_project()).into_any_element();
     }
-    area.children((0..state.workspace.panes.len()).map(|pane| render_pane(shell, state, pane)))
+    area.children((0..state.workspace.panes.len()).map(|pane| render_pane(shell, state, pane, cx)))
         .into_any_element()
 }
 
@@ -42,7 +43,7 @@ fn no_project() -> impl IntoElement {
         )
 }
 
-fn render_pane(shell: &Shell, state: &AppState, pane: usize) -> AnyElement {
+fn render_pane(shell: &Shell, state: &AppState, pane: usize, cx: &Context<Shell>) -> AnyElement {
     let p = &state.workspace.panes[pane];
     let focused = pane == state.workspace.focused_pane;
     let tabs = p.tabs.iter().enumerate().map(|(i, tab)| {
@@ -50,6 +51,8 @@ fn render_pane(shell: &Shell, state: &AppState, pane: usize) -> AnyElement {
         render_tab(shell, state, pane, i, tab, active, focused && active)
     });
     let body = match p.active.and_then(|a| p.tabs.get(a)) {
+        Some(TabKind::Pattern(id)) => pattern_tab::render(shell, state, id),
+        Some(TabKind::Instrument(id)) => instrument_tab::render(shell, state, id, cx),
         Some(tab) => placeholder_editor(state, tab),
         None => empty_pane().into_any_element(),
     };
@@ -148,13 +151,8 @@ fn empty_pane() -> impl IntoElement {
         .child("Open a pattern from the sidebar")
 }
 
-/// Stand-in editor bodies until the channel rack, piano roll and instrument tab exist.
+/// Stand-in for the piano roll until it exists.
 fn placeholder_editor(state: &AppState, tab: &TabKind) -> AnyElement {
-    let kind = match tab {
-        TabKind::Pattern(_) => "Channel rack",
-        TabKind::PianoRoll(..) => "Piano roll",
-        TabKind::Instrument(_) => "Sampler",
-    };
     div()
         .size_full()
         .flex()
@@ -163,23 +161,6 @@ fn placeholder_editor(state: &AppState, tab: &TabKind) -> AnyElement {
         .justify_center()
         .gap(px(6.))
         .child(div().text_color(theme::text_strong()).child(tab_title(tab, &state.project)))
-        .child(div().text_color(theme::text_faint()).child(format!("{kind} editor — coming soon")))
-        .when_some(sample_line(state, tab), |d, (line, missing)| {
-            d.child(
-                div()
-                    .text_color(if missing { theme::warning() } else { theme::text_muted() })
-                    .child(line),
-            )
-        })
+        .child(div().text_color(theme::text_faint()).child("Piano roll editor — coming soon"))
         .into_any_element()
-}
-
-/// For an instrument tab: its sample state, and whether that is a missing sample.
-fn sample_line(state: &AppState, tab: &TabKind) -> Option<(String, bool)> {
-    let TabKind::Instrument(id) = tab else { return None };
-    Some(match state.sample_status(id) {
-        SampleStatus::NoSample => ("No sample".to_string(), false),
-        SampleStatus::Ok => ("Sample loaded".to_string(), false),
-        SampleStatus::Missing(e) => (format!("Missing sample: {e}"), true),
-    })
 }

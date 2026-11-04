@@ -182,3 +182,30 @@ impl Render for TextField {
             .when(focused, |d| d.child(div().w(px(1.)).h(px(13.)).bg(theme::accent())))
     }
 }
+
+/// A small hover tooltip with one line (or a few wrapped lines) of text.
+pub struct Tooltip(SharedString);
+
+impl Tooltip {
+    /// For `.tooltip(...)`: builds the tooltip view on hover.
+    pub fn text(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView {
+        let text = text.into();
+        move |_, cx| cx.new(|_| Tooltip(text.clone())).into()
+    }
+}
+
+impl Render for Tooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .max_w(px(420.))
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(4.))
+            .bg(theme::chrome_bg())
+            .border_1()
+            .border_color(theme::border())
+            .text_color(theme::text())
+            .text_size(px(theme::FONT_SIZE))
+            .child(self.0.clone())
+    }
+}

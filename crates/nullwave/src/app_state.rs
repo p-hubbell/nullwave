@@ -6,19 +6,19 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use basedrop::{Collector, Owned};
+use basedrop::{Collector, Owned, Shared};
 use gpui::{Context, PathPromptOptions, Subscription, Task};
 use nw_core::{
-    DocPath, Edit, History, InstrumentId, Pattern, PatternId, Project, Tick, hash_bytes,
-    load_project, next_pattern,
+    DocPath, Edit, History, Instrument, InstrumentId, Pattern, PatternId, Project, Tick,
+    hash_bytes, load_project, new_instrument, next_pattern, remove_instrument_edit,
 };
 use nw_engine::core::{Command, Feedback};
 use nw_engine::handle::EngineHandle;
-use nw_engine::sample::SampleCache;
+use nw_engine::sample::{SampleCache, load_sample};
 use nw_engine::snapshot::compile_snapshot;
 use nw_workspace::{
-    AppSettings, DirtyTracker, TabKind, WorkspaceState, load_settings, load_workspace,
-    save_settings, save_workspace, settings_dir,
+    AUDIO_EXTENSIONS, AppSettings, DirtyTracker, TabKind, WorkspaceState, is_audio,
+    load_settings, load_workspace, save_settings, save_workspace, settings_dir,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
@@ -57,6 +57,8 @@ pub struct AppState {
     fallback_collector: Option<Collector>,
     /// Sample paths whose load failure is already in the log.
     reported_sample_errors: HashSet<PathBuf>,
+    /// Bumped on every preview request so only the latest one sounds.
+    preview_generation: u64,
     workspace_save: Option<Task<()>>,
     _poll: Task<()>,
     _quit: Subscription,
@@ -122,6 +124,7 @@ impl AppState {
             settings_path,
             fallback_collector,
             reported_sample_errors: HashSet::new(),
+            preview_generation: 0,
             workspace_save: None,
             _poll: poll,
             _quit: quit,
@@ -364,18 +367,19 @@ impl AppState {
         }
     }
 
-    /// Adds the next numbered pattern and opens its tab.
-    pub fn new_pattern(&mut self, cx: &mut Context<Self>) {
+    /// Adds the next numbered pattern, opens its tab and returns its id.
+    pub fn new_pattern(&mut self, cx: &mut Context<Self>) -> Option<PatternId> {
         if self.project_dir.is_none() {
             self.log("Open or create a project first");
             cx.notify();
-            return;
+            return None;
         }
         let (id, name) = next_pattern(&self.project);
         let pattern = Pattern { id: id.clone(), name, notes: BTreeMap::new() };
         let index = self.project.patterns.len();
         self.apply(vec![Edit::AddPattern { pattern, index }], cx);
-        self.open_tab(TabKind::Pattern(id), cx);
+        self.open_tab(TabKind::Pattern(id.clone()), cx);
+        Some(id)
     }
 
     /// Asks for a folder with the native folder picker and adds it to the sample folders.
@@ -399,6 +403,159 @@ impl AppState {
                     Ok(Err(e)) => state.log(format!("Could not open the folder picker: {e}")),
                 }
                 cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Adds a sampler named after the file stem, playing `path`, at the end of the rack.
+    pub fn add_instrument_from_sample(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.project_dir.is_none() {
+            return;
+        }
+        let stem = path.file_stem().map_or_else(|| "sampler".into(), |s| s.to_string_lossy().into_owned());
+        let (id, name) = new_instrument(&self.project, &stem);
+        let mut instrument = Instrument::new(id, name);
+        instrument.sampler.sample_path = Some(path);
+        let index = self.project.instruments.len();
+        self.apply(vec![Edit::AddInstrument { instrument, index }], cx);
+    }
+
+    /// Points instrument `id` at a different sample file.
+    pub fn set_instrument_sample(&mut self, id: &InstrumentId, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(before) = self.project.instrument(id).cloned() else { return };
+        let mut after = before.clone();
+        after.sampler.sample_path = Some(path.clone());
+        // A file that was missing before may be back; load it fresh.
+        self.samples.invalidate(&path);
+        self.update_instrument(before, after, cx);
+    }
+
+    /// Commits one `UpdateInstrument` step (nothing if unchanged).
+    pub fn update_instrument(&mut self, before: Instrument, after: Instrument, cx: &mut Context<Self>) {
+        if before != after {
+            self.apply(vec![Edit::UpdateInstrument { before, after }], cx);
+        }
+    }
+
+    /// Removes the instrument with all its notes; its tabs close. Undo restores both.
+    pub fn delete_instrument(&mut self, id: &InstrumentId, cx: &mut Context<Self>) {
+        if let Some(edit) = remove_instrument_edit(&self.project, id) {
+            self.apply(vec![edit], cx);
+        }
+    }
+
+    pub fn rename_pattern(&mut self, id: &PatternId, name: &str, cx: &mut Context<Self>) {
+        let after = name.trim().to_string();
+        let Some(pattern) = self.project.pattern(id) else { return };
+        if after.is_empty() || after == pattern.name {
+            return;
+        }
+        let before = pattern.name.clone();
+        self.apply(vec![Edit::RenamePattern { id: id.clone(), before, after }], cx);
+    }
+
+    /// Removes the pattern; its tabs close. Undo restores it.
+    pub fn delete_pattern(&mut self, id: &PatternId, cx: &mut Context<Self>) {
+        let Some(index) = self.project.patterns.iter().position(|p| &p.id == id) else { return };
+        let pattern = self.project.patterns[index].clone();
+        if self.playing && self.last_played_pattern.as_ref() == Some(id) {
+            self.send(Command::Stop);
+            self.playing = false;
+            self.playhead = 0;
+        }
+        self.apply(vec![Edit::RemovePattern { pattern, index }], cx);
+    }
+
+    /// Asks for audio files with the native picker and adds a sampler for each.
+    pub fn prompt_add_instruments(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Add Instrument".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let result = paths.await;
+            this.update(cx, |state, cx| {
+                match result {
+                    Ok(Ok(Some(paths))) => {
+                        for path in paths {
+                            if is_audio(&path) {
+                                state.add_instrument_from_sample(path, cx);
+                            } else {
+                                let list = AUDIO_EXTENSIONS.join(", ");
+                                state.log(format!("Not an audio file ({list}): {}", path.display()));
+                            }
+                        }
+                    }
+                    Ok(Ok(None)) | Err(_) => {}
+                    Ok(Err(e)) => state.log(format!("Could not open the file picker: {e}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks for one audio file with the native picker and loads it into instrument `id`.
+    pub fn prompt_change_sample(&mut self, id: &InstrumentId, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose Sample".into()),
+        });
+        let id = id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = paths.await;
+            this.update(cx, |state, cx| {
+                match result {
+                    Ok(Ok(Some(paths))) => {
+                        if let Some(path) = paths.into_iter().next() {
+                            if is_audio(&path) {
+                                state.set_instrument_sample(&id, path, cx);
+                            } else {
+                                let list = AUDIO_EXTENSIONS.join(", ");
+                                state.log(format!("Not an audio file ({list}): {}", path.display()));
+                            }
+                        }
+                    }
+                    Ok(Ok(None)) | Err(_) => {}
+                    Ok(Err(e)) => state.log(format!("Could not open the file picker: {e}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Plays `path` once through the preview voice, replacing any preview already sounding.
+    /// The file loads on the background executor; a later click wins over a slower load.
+    pub fn preview_sample(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(engine) = &self.engine else { return };
+        let handle = engine.collector_handle();
+        self.preview_generation += 1;
+        let generation = self.preview_generation;
+        let load = cx.background_executor().spawn(async move {
+            load_sample(&path).map(|b| Shared::new(&handle, b)).map_err(|e| (path, e))
+        });
+        cx.spawn(async move |this, cx| {
+            let loaded = load.await;
+            this.update(cx, |state, cx| {
+                if state.preview_generation != generation {
+                    return;
+                }
+                match loaded {
+                    Ok(sample) => state.send(Command::Preview(sample)),
+                    Err((path, e)) => {
+                        state.log(format!("Can't preview {}: {e}", path.display()));
+                        cx.notify();
+                    }
+                }
             })
             .ok();
         })
