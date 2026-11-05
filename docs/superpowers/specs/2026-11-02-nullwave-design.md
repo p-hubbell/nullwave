@@ -2,6 +2,7 @@
 
 Date: 2026-11-02
 Status: draft for review
+Revised 2026-11-04: the sampler grows from a minimal one-shot player to an FL-style sampler (see "Sampler"). The user asked to pack in as much of FL's Sampler channel as possible, all of it before the first-evening acceptance pass.
 Background: `references/initial-concept.md` (the original concept outline) and `references/Screenshot 2026-11-02 at 8.31.17 PM.png` (rough wireframe). This document narrows and in places overrides the concept outline; where they disagree, this document wins.
 
 ## Intent and why
@@ -30,7 +31,7 @@ The user opens Nullwave for an evening instead of FL and, by the end, has create
 
 - Third-party plugins (VST3/AU/CLAP). Omnisphere etc. come in a later phase.
 - Song arrangement timeline (comes right after the first version).
-- Mixer, buses, effects, built-in synth.
+- Mixer, buses, effects, built-in synth. (The sampler's own filter and modulation are part of the instrument, not effects.)
 - MIDI keyboard input and recording notes (the user wants this in the future, not in the first version).
 - Audio recording, audio clips, automation.
 - WAV export, `.mid` export.
@@ -93,11 +94,43 @@ One window. From left to right, top to bottom:
 
 ### Sampler (the one built-in instrument)
 
-Modelled on FL Studio's Sampler channel:
+Modelled on FL Studio's Sampler channel, with as much of its feature set as fits the first version. The user's words: "pack in as many of FL sampler's features as we can."
 
-- One audio file per sampler instrument, played from the piano roll, pitched across the keys relative to a root note.
-- A basic volume envelope (at least attack and release) so samples can be cut short or faded.
-- Volume and pan (above).
+**How we match FL.** Behaviour comes from Image-Line's public FL Studio manual (Sampler channel settings) and from black-box comparison: rendering the same notes in the user's own FL install and in Nullwave, then comparing by ear or with a spectrum view. We do **not** decompile or disassemble FL Studio: its licence forbids it, and code shaped by its binary would be a copyright liability for a tool we may ship. Where the manual and our ears disagree, our ears win.
+
+One audio file per sampler instrument, played from the piano roll, pitched across the keys relative to a root note. Everything below is per instrument.
+
+**A. Sample and playback**
+- **Region:** start and end points, stored as fractions (0–1) of the file's length so they survive the file being re-exported at another length; start < end.
+- **Loop:** off, forward or ping-pong, with loop start and end inside the region and a crossfade (0–500 ms) at the forward loop point so it doesn't click.
+- **One-shot vs. held:** held (default, today's behaviour) ends the sound at the note's end and then releases; one-shot plays the whole region regardless of note length. With a loop on, the note's end always ends the sound.
+- **Sample processing** (FL's "precomputed effects"): reverse, normalize, invert polarity, swap stereo, and declick (short fades at region and loop edges, on by default). These are computed off the audio thread when the sample or setting changes, never per note.
+- **Pitch:** root note (0–127), coarse tune (±24 semitones) and fine tune (±100 cents).
+
+**B. Envelopes, filter and modulation**
+- **Volume envelope:** delay, attack, hold, decay, sustain and release (DAHDSR). Times 0–5000 ms (delay and hold 0–2000 ms), sustain 0–100 %, plus a curve (tension) for the attack and for decay/release. The default (all 0 ms, sustain 100 %, release 20 ms) sounds exactly like today's sampler.
+- **Filter:** off, low-pass, high-pass, band-pass or notch (state-variable, 12 dB/oct), with cutoff 20 Hz–20 kHz on a log scale and resonance 0–100 %. Off by default.
+- **Modulation envelopes:** DAHDSR envelopes for filter cutoff (±8 octaves), pitch (±24 semitones) and pan (±100 %). Each has an amount that defaults to 0, meaning off.
+- **LFOs** for volume, pan, cutoff and pitch: shape (sine, triangle, saw, square, random/sample-and-hold), rate free (0.01–50 Hz) or tempo-synced (1/64 note to 8 bars), amount (0 = off), and delay. Each LFO restarts with every note.
+- **Velocity:** velocity → volume (0–100 %, default 100 % as today) and velocity → cutoff (±8 octaves, default 0).
+
+**C. Voices**
+- **Polyphony limit** (1–64 per instrument, default 64). Over the limit, that instrument's oldest voice fades out.
+- **Mono** with **glide (portamento)** 0–2000 ms: one voice per instrument. With glide above 0, a new note while one sounds slides pitch without restarting the envelope (legato). With glide 0, it restarts the voice.
+- **Cut groups**, FL-style: `cut` is the group this instrument's notes cut, and `cut by` is the group that cuts this instrument (e.g. an open hi-hat cut by a closed one). Groups 1–16; 0 means none.
+- Any voice that is stolen, cut or limited fades over a few milliseconds rather than stopping dead, so it never clicks.
+
+**Real-time and timing rules for all of the above**
+- The audio thread never allocates. Every voice preallocates its filter, envelope, LFO and glide state, and processed samples arrive through the snapshot like the samples do today.
+- Parameter edits commit when a control is released (one undo step) and apply to notes that start afterwards. Sounding voices keep the values they started with. Changing them live is on the roadmap.
+- Old project files load unchanged: missing fields take the defaults above, and the existing `attack_ms` / `release_ms` become the volume envelope's attack and release. New values are range-checked on load like the existing ones.
+
+**D. Instrument tab**
+- Organised into sections: **Sample**, **Pitch**, **Envelopes**, **Filter**, **LFO**, **Velocity**, **Voice**.
+- **Sample** shows the waveform with draggable start, end and loop markers, plus the processing toggles, loop mode, crossfade and one-shot. Waveform peaks are computed off the UI thread and cached.
+- **Envelopes** has one graph per envelope (volume, cutoff, pitch, pan) with draggable points, and numeric sliders beside it.
+- Every control commits one `UpdateInstrument` when the drag or edit ends, as today. A small ▶ button auditions the instrument at its root note.
+- It is still a tab, never a floating window.
 
 ### Sample browsing
 
@@ -113,14 +146,15 @@ Modelled on FL Studio's Sampler channel:
 4. WAV export (offline render).
 5. Third-party plugins: CLAP via `clack` first, then VST3/AU (needed for Omnisphere).
 6. MIDI keyboard: play notes live and record them into the piano roll (`midir`).
-7. Later: a "collect samples into project" command (like FL's zipped project export), audio recording, automation, in-app git panel, `.mid` export, step sequencer, extension API.
+7. Sampler extras: time-stretch (tempo-independent pitch), arpeggiator, granular mode, keep-on-disk streaming for very long samples, multi-sample key zones, and parameter changes that affect already-sounding voices.
+8. Later: a "collect samples into project" command (like FL's zipped project export), audio recording, automation, in-app git panel, `.mid` export, step sequencer, extension API.
 
 ## Calls I made (the user can override)
 
 - **macOS first.** That's what the user is on. Code shouldn't preclude Windows/Linux, but they aren't tested or shipped.
 - **Single window**, no multi-window support in the first version.
 - **No inspector panel** by default; note details show in the bottom panel / on hover.
-- **Sampler only** in the first version; the synth moves to the roadmap. The user said an FL-style sampler is "good enough".
+- **Sampler only** in the first version; the synth moves to the roadmap. The user said an FL-style sampler is "good enough", and later asked for as much of FL's Sampler feature set as fits (see "Sampler").
 - **Project format: RON**, one file per instrument and per pattern-instrument note sequence, so git diffs stay small. Suggested shape (the builder may refine):
   ```
   my-song/
@@ -138,13 +172,13 @@ Modelled on FL Studio's Sampler channel:
 - **Pattern length is FL-style**: a pattern's loop length follows its last note across all instruments, rounded up to a whole bar, minimum one bar. No per-pattern length setting in the first version. Space plays the pattern in the focused tab.
 - **Saving is explicit, like VS Code**: ⌘S saves; unsaved-change dots on tabs; a prompt on quit with unsaved changes. A pattern open in two tabs is one document. Unsaved work is also written to `.nullwave/` periodically for crash recovery. Undo/redo covers all edits within a session and is not kept across restarts.
 - **Outside file changes are handled like VS Code**: the app watches the project folder; if a file changes on disk (hand edit, git checkout) and there are no unsaved changes, it reloads silently; if there are, it asks which to keep.
-- **Instrument settings open as an instrument tab** (e.g. `Sampler: Drums`), opened by clicking the instrument name on a channel-rack row — consistent with "built-in instruments open as tabs, never floating windows" from the conversation. The tab holds sample, root note, attack/release, volume and pan. The right dock stays empty.
+- **Instrument settings open as an instrument tab** (e.g. `Sampler: Drums`), opened by clicking the instrument name on a channel-rack row — consistent with "built-in instruments open as tabs, never floating windows" from the conversation. The tab holds the sampler sections described under "Sampler", plus volume and pan. The right dock stays empty.
 - **Default keybindings follow VS Code conventions** (⌘⇧P palette, ⌘P quick open, ⌘W close tab, ⌘B toggle sidebar, ⌘J toggle bottom panel), with Space for play/stop. All rebindable via a keymap file. Shortcuts are context-aware (same key may act differently in the piano roll vs the pattern tab).
 
 ## Left to the builder
 
 - GPUI version to pin, and how to structure the component layer around it (concept outline: keep UI code behind your own components; use Zed's source as reference).
-- Audio graph: custom vs Firewheel. The first version's graph is small (N samplers → pan/volume → output), so a simple custom graph is reasonable.
+- Audio graph: custom vs Firewheel. The first version's graph is small (N samplers, each voice with its own filter and modulation → pan/volume → output), so a simple custom graph is reasonable.
 - Exact piano roll interactions beyond the basics above, zoom behaviour, grid sizes.
 - Visual styling, within "calm, VS Code/Zed-like, dark by default".
 - Test strategy and real-time stress testing approach.
