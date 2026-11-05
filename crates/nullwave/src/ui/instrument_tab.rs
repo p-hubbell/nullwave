@@ -32,8 +32,8 @@ pub enum Field {
 impl Field {
     fn get(self, inst: &Instrument) -> f32 {
         match self {
-            Field::Attack => inst.sampler.attack_ms,
-            Field::Release => inst.sampler.release_ms,
+            Field::Attack => inst.sampler.volume_env.attack_ms,
+            Field::Release => inst.sampler.volume_env.release_ms,
             Field::Volume => inst.volume,
             Field::Pan => inst.pan,
         }
@@ -41,8 +41,8 @@ impl Field {
 
     fn set(self, inst: &mut Instrument, value: f32) {
         match self {
-            Field::Attack => inst.sampler.attack_ms = value,
-            Field::Release => inst.sampler.release_ms = value,
+            Field::Attack => inst.sampler.volume_env.attack_ms = value,
+            Field::Release => inst.sampler.volume_env.release_ms = value,
             Field::Volume => inst.volume = value,
             Field::Pan => inst.pan = value,
         }

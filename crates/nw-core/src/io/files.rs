@@ -194,7 +194,7 @@ fn validate_instrument(rel: &Path, inst: &Instrument) -> Result<(), LoadError> {
     if !(-1.0..=1.0).contains(&inst.pan) {
         return Err(invalid(rel, format!("pan {} outside -1..=1", inst.pan)));
     }
-    Ok(())
+    inst.sampler.validate().map_err(|e| invalid(rel, format!("sampler.{e}")))
 }
 
 fn validate_notes(rel: &Path, notes: &[Note]) -> Result<(), LoadError> {

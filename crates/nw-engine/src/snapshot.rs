@@ -47,8 +47,8 @@ pub fn compile_snapshot(
         .map(|inst| InstrumentSnapshot {
             sample: inst.sampler.sample_path.as_deref().and_then(|p| samples.get(p).ok()),
             root_note: inst.sampler.root_note,
-            attack_ms: inst.sampler.attack_ms.max(0.0),
-            release_ms: inst.sampler.release_ms.max(0.0),
+            attack_ms: inst.sampler.volume_env.attack_ms.max(0.0),
+            release_ms: inst.sampler.volume_env.release_ms.max(0.0),
             volume: inst.volume.clamp(0.0, 1.0),
             pan: inst.pan.clamp(-1.0, 1.0),
         })

@@ -128,8 +128,8 @@ fn project_with(path: Option<PathBuf>, notes: Vec<Note>) -> (Project, PatternId)
     instrument.sampler.sample_path = path;
     instrument.pan = 3.0;
     instrument.volume = 2.0;
-    instrument.sampler.attack_ms = -5.0;
-    instrument.sampler.release_ms = -1.0;
+    instrument.sampler.volume_env.attack_ms = -5.0;
+    instrument.sampler.volume_env.release_ms = -1.0;
     let pid = PatternId("p1".into());
     let mut map = BTreeMap::new();
     map.insert(id, notes);

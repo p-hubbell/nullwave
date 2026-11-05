@@ -111,7 +111,7 @@ One audio file per sampler instrument, played from the piano roll, pitched acros
 - **Volume envelope:** delay, attack, hold, decay, sustain and release (DAHDSR). Times 0–5000 ms (delay and hold 0–2000 ms), sustain 0–100 %, plus a curve (tension) for the attack and for decay/release. The default (all 0 ms, sustain 100 %, release 20 ms) sounds exactly like today's sampler.
 - **Filter:** off, low-pass, high-pass, band-pass or notch (state-variable, 12 dB/oct), with cutoff 20 Hz–20 kHz on a log scale and resonance 0–100 %. Off by default.
 - **Modulation envelopes:** DAHDSR envelopes for filter cutoff (±8 octaves), pitch (±24 semitones) and pan (±100 %). Each has an amount that defaults to 0, meaning off.
-- **LFOs** for volume, pan, cutoff and pitch: shape (sine, triangle, saw, square, random/sample-and-hold), rate free (0.01–50 Hz) or tempo-synced (1/64 note to 8 bars), amount (0 = off), and delay. Each LFO restarts with every note.
+- **LFOs** for volume, pan, cutoff and pitch: shape (sine, triangle, saw, square, random/sample-and-hold), rate free (0.01–50 Hz) or tempo-synced (1/64 note to 8 bars), amount (0 = off; volume and pan 0–100 %, cutoff ±8 octaves, pitch ±24 semitones), and delay (0–5000 ms). Each LFO restarts with every note.
 - **Velocity:** velocity → volume (0–100 %, default 100 % as today) and velocity → cutoff (±8 octaves, default 0).
 
 **C. Voices**

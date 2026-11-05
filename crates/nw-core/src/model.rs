@@ -1,7 +1,7 @@
+use crate::sampler::Sampler;
 use crate::time::{Tick, TimeSignature};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 pub const DEFAULT_VELOCITY: u8 = 100;
 
@@ -24,20 +24,6 @@ pub struct Note {
 impl Note {
     pub fn end(&self) -> Tick {
         self.start + self.length
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Sampler {
-    pub sample_path: Option<PathBuf>,
-    pub root_note: u8,
-    pub attack_ms: f32,
-    pub release_ms: f32,
-}
-
-impl Default for Sampler {
-    fn default() -> Self {
-        Self { sample_path: None, root_note: 60, attack_ms: 0.0, release_ms: 20.0 }
     }
 }
 
