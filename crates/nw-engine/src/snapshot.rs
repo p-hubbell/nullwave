@@ -2,7 +2,7 @@
 //! parameters plus the note events of one pattern, sorted by tick.
 
 use basedrop::Shared;
-use nw_core::{Envelope, Filter, Lfo, ModEnvelope, PatternId, Project, Tick, VelocityMap};
+use nw_core::{Envelope, Filter, Lfo, ModEnvelope, PatternId, Project, Tick, VelocityMap, VoiceSettings};
 
 use crate::process::{PlayRegion, ProcessSettings};
 use crate::sample::{SampleBuffer, SampleCache};
@@ -30,6 +30,7 @@ pub struct InstrumentSnapshot {
     pub cutoff_lfo: Lfo,
     pub pitch_lfo: Lfo,
     pub velocity: VelocityMap,
+    pub voice: VoiceSettings,
 }
 
 impl InstrumentSnapshot {
@@ -54,6 +55,7 @@ impl InstrumentSnapshot {
             cutoff_lfo: Lfo::default(),
             pitch_lfo: Lfo::default(),
             velocity: VelocityMap::default(),
+            voice: VoiceSettings::default(),
         }
     }
 }
@@ -122,6 +124,7 @@ pub fn compile_snapshot(
                 cutoff_lfo: s.cutoff_lfo,
                 pitch_lfo: s.pitch_lfo,
                 velocity: s.velocity,
+                voice: s.voice,
             }
         })
         .collect();

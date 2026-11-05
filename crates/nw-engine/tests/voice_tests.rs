@@ -12,6 +12,8 @@ fn start(sample: Shared<SampleBuffer>) -> VoiceStart {
     let region = PlayRegion::whole(sample.len());
     VoiceStart {
         sample,
+        instrument: 0,
+        pitch: 60,
         region,
         rate: 1.0,
         params: VoiceParams::simple(0.5, 0.0, 0, 0),

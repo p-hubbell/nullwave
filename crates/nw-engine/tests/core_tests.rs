@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use basedrop::{Collector, Owned, Shared};
 use nw_core::{Envelope, Instrument, InstrumentId, Note, Pattern, PatternId, Project, Tick};
-use nw_engine::core::{Command, EngineCore, Feedback, MAX_VOICES, run_block};
+use nw_engine::core::{Command, EngineCore, FADE_RESERVE, Feedback, MAX_VOICES, run_block};
 use nw_engine::process::PlayRegion;
 use nw_engine::sample::{SampleBuffer, SampleCache};
 use nw_engine::snapshot::{InstrumentSnapshot, NoteEvent, Snapshot, compile_snapshot};
@@ -263,7 +263,10 @@ fn process_does_not_allocate() {
     assert_no_alloc::assert_no_alloc(|| {
         run_block(&mut core, &mut cmd_rx, &mut fb_tx, &mut buf[..512]);
     });
-    assert_eq!(core.active_voices(), MAX_VOICES);
+    // 64 voices sound their notes; voices stolen after they were heard may still be
+    // fading out in the reserve slots.
+    assert_eq!(core.sounding_notes().len(), MAX_VOICES);
+    assert!(core.active_voices() <= MAX_VOICES + FADE_RESERVE);
 
     let new = snap(&c, 100.0, 1920, vec![inst(Some(sample.clone()), 20.0)], events);
     cmd_tx.push(Command::SetSnapshot(new)).ok().unwrap();

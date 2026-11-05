@@ -15,6 +15,10 @@ use crate::lfo::LfoParams;
 use crate::voice::{ModEnv, ModLfo, Voice, VoiceParams, VoiceStart, tuned_rate};
 
 pub const MAX_VOICES: usize = 64;
+/// Extra voice slots where stolen voices fade out while their slot plays the new note.
+pub const FADE_RESERVE: usize = 16;
+/// How long a stolen, cut or over-limit voice takes to fade out.
+pub const FADE_MS: f32 = 5.0;
 /// Largest number of frames rendered in one pass; longer `out` slices are chunked.
 pub const MAX_BLOCK_FRAMES: usize = 4096;
 
@@ -64,7 +68,7 @@ impl EngineCore {
             playing: false,
             position: 0.0,
             cursor: 0,
-            voices: (0..MAX_VOICES).map(|_| Voice::default()).collect(),
+            voices: (0..MAX_VOICES + FADE_RESERVE).map(|_| Voice::default()).collect(),
             next_age: 0,
             preview: None,
             scratch_l: vec![0.0; MAX_BLOCK_FRAMES],
@@ -102,6 +106,8 @@ impl EngineCore {
                 let region = PlayRegion::whole(sample.left.len().min(sample.right.len()));
                 let start = VoiceStart {
                     sample,
+                    instrument: usize::MAX,
+                    pitch: 0,
                     region,
                     rate,
                     params: VoiceParams {
@@ -116,9 +122,9 @@ impl EngineCore {
             Command::PreviewNote { instrument, pitch, velocity, length } => {
                 self.release_preview();
                 let event = NoteEvent { tick: 0, instrument, pitch, velocity, length };
-                if let Some(start) = self.note_start(event, self.samples_per_tick()) {
-                    self.preview = Some(self.start_voice(start));
-                }
+                self.preview = self
+                    .play_note(event, self.samples_per_tick())
+                    .map(|index| (index, self.voices[index].age()));
             }
             Command::StopPreview => self.release_preview(),
         }
@@ -239,9 +245,81 @@ impl EngineCore {
     }
 
     fn fire(&mut self, event: NoteEvent, spt: f64) {
-        if let Some(start) = self.note_start(event, spt) {
-            self.start_voice(start);
+        self.play_note(event, spt);
+    }
+
+    /// Starts `event`, applying its instrument's cut group, mono/glide and polyphony
+    /// rules. Returns the voice that plays it.
+    fn play_note(&mut self, event: NoteEvent, spt: f64) -> Option<usize> {
+        let start = self.note_start(event, spt)?;
+        let settings = self.snapshot.instruments.get(event.instrument)?.voice;
+        let fade = self.ms_to_samples(FADE_MS);
+        let instrument = event.instrument;
+
+        // Cut groups: this note chokes every voice whose instrument is cut by its group.
+        if settings.cut > 0 {
+            let instruments = &self.snapshot.instruments;
+            for v in self.voices.iter_mut().filter(|v| v.is_active() && !v.is_fading()) {
+                if instruments.get(v.instrument()).is_some_and(|i| i.voice.cut_by == settings.cut) {
+                    v.fade_out(fade);
+                }
+            }
         }
+
+        if settings.mono {
+            let glide = self.ms_to_samples(settings.glide_ms);
+            if glide > 0 {
+                // Legato onto the newest voice of this instrument that is still held.
+                let held = (0..self.voices.len())
+                    .filter(|&i| {
+                        let v = &self.voices[i];
+                        v.is_active() && v.instrument() == instrument && !v.is_ending()
+                    })
+                    .max_by_key(|&i| self.voices[i].age());
+                if let Some(i) = held {
+                    self.voices[i].glide_to(start.rate, glide, start.duration_samples, event.pitch);
+                    return Some(i);
+                }
+            }
+            for v in self.voices.iter_mut() {
+                if v.is_active() && v.instrument() == instrument {
+                    v.fade_out(fade);
+                }
+            }
+        } else {
+            // Polyphony: fade this instrument's oldest voices until there is room.
+            let limit = usize::from(settings.polyphony.max(1));
+            loop {
+                let mut count = 0;
+                let mut oldest: Option<usize> = None;
+                for (i, v) in self.voices.iter().enumerate() {
+                    if v.is_active() && !v.is_fading() && v.instrument() == instrument {
+                        count += 1;
+                        if oldest.is_none_or(|o| v.age() < self.voices[o].age()) {
+                            oldest = Some(i);
+                        }
+                    }
+                }
+                match oldest {
+                    Some(o) if count >= limit => self.voices[o].fade_out(fade),
+                    _ => break,
+                }
+            }
+        }
+        Some(self.start_voice(start).0)
+    }
+
+    /// Instrument and pitch of every voice still sounding its note (not fading), sorted.
+    /// Allocates: for tests and diagnostics, not the audio thread.
+    pub fn sounding_notes(&self) -> Vec<(usize, u8)> {
+        let mut notes: Vec<(usize, u8)> = self
+            .voices
+            .iter()
+            .filter(|v| v.is_active() && !v.is_fading())
+            .map(|v| (v.instrument(), v.pitch()))
+            .collect();
+        notes.sort_unstable();
+        notes
     }
 
     /// How `event` sounds through its instrument; `None` if that has no sample.
@@ -252,6 +330,8 @@ impl EngineCore {
         let held = !inst.one_shot || inst.region.is_looping();
         Some(VoiceStart {
             sample: sample.clone(),
+            instrument: event.instrument,
+            pitch: event.pitch,
             region: inst.region,
             rate: tuned_rate(
                 event.pitch,
@@ -296,16 +376,23 @@ impl EngineCore {
         }
     }
 
-    /// Start a voice in a free slot, or steal the oldest. Returns `(index, age)`.
+    /// Starts a voice in a free slot, or steals the oldest. A stolen voice that has been
+    /// heard moves to a free fade-reserve slot and fades out there (no allocation: the
+    /// slots are swapped); with no reserve slot free it is cut. Returns `(index, age)`.
     fn start_voice(&mut self, mut start: VoiceStart) -> (usize, u64) {
-        let index = match self.voices.iter().position(|v| !v.is_active()) {
+        let index = match self.voices[..MAX_VOICES].iter().position(|v| !v.is_active()) {
             Some(i) => i,
             None => {
                 let mut oldest = 0;
-                for (i, v) in self.voices.iter().enumerate() {
+                for (i, v) in self.voices[..MAX_VOICES].iter().enumerate() {
                     if v.age() < self.voices[oldest].age() {
                         oldest = i;
                     }
+                }
+                if let Some(r) = (MAX_VOICES..self.voices.len()).find(|&r| !self.voices[r].is_active()) {
+                    self.voices.swap(oldest, r);
+                    let fade = self.ms_to_samples(FADE_MS);
+                    self.voices[r].fade_out(fade);
                 }
                 oldest
             }

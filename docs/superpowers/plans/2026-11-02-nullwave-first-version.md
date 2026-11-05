@@ -886,7 +886,7 @@ The spec's "Sampler" section (revised 2026-11-04) defines every parameter, range
 **Interfaces:**
 - Produces: `Voice::fade_out(samples)`, a fast linear fade from the current level that ignores the release time. `Voice::glide_to(rate, glide_samples)` for legato. Voices remember their instrument index.
 - Behavior:
-  - **Fades:** every stolen, cut or over-limit voice fades over 5 ms (`FADE_MS`).
+  - **Fades:** every stolen, cut or over-limit voice fades over 5 ms (`FADE_MS`). A voice that has not rendered a frame yet (e.g. stolen in the same frame it started) is replaced outright, since there is nothing to fade. `EngineCore::sounding_notes()` lists `(instrument, pitch)` of voices that are not fading, for tests.
   - **Fade reserve:** the pool gains 16 reserve slots (`FADE_RESERVE`). When all `MAX_VOICES` are busy, the oldest voice is swapped (`voices.swap`, no allocation) into a free reserve slot to fade, and its slot takes the new note. With no free reserve slot it is cut hard, which is the old behaviour.
   - **Polyphony:** starting a note over the instrument's limit fades that instrument's oldest voice.
   - **Mono:** at most one non-fading voice per instrument. With `glide_ms > 0` and a voice sounding, the new note glides that voice's pitch (exponential in pitch, over `glide_ms`), keeps its envelope, and takes the new note's length. With `glide_ms == 0` the old voice fades and a new one starts.

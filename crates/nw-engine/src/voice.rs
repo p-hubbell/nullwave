@@ -110,6 +110,9 @@ impl VoiceParams {
 
 pub struct VoiceStart {
     pub sample: Shared<SampleBuffer>,
+    /// Index of the instrument in the snapshot (for polyphony, mono and cut groups).
+    pub instrument: usize,
+    pub pitch: u8,
     /// The frames to play (and loop) within `sample`.
     pub region: PlayRegion,
     /// Playback rate before pitch modulation.
@@ -244,6 +247,14 @@ pub struct Voice {
     modulation: Modulation,
     remaining: Option<u64>,
     age: u64,
+    instrument: usize,
+    pitch: u8,
+    /// Whether any frame has been rendered since `start`.
+    sounded: bool,
+    /// A fast fade-out in progress: frames left and total.
+    fade: Option<(u32, u32)>,
+    /// A legato pitch glide in progress: frames left, per-frame rate factor, final rate.
+    glide: Option<(u32, f64, f64)>,
 }
 
 impl Default for Voice {
@@ -259,6 +270,11 @@ impl Default for Voice {
             modulation: Modulation::default(),
             remaining: None,
             age: 0,
+            instrument: usize::MAX,
+            pitch: 0,
+            sounded: false,
+            fade: None,
+            glide: None,
         }
     }
 }
@@ -301,6 +317,11 @@ impl Voice {
         self.params = s.params;
         self.remaining = s.duration_samples;
         self.age = s.age;
+        self.instrument = s.instrument;
+        self.pitch = s.pitch;
+        self.sounded = false;
+        self.fade = None;
+        self.glide = None;
         self.volume_env.start(s.params.volume_env);
         self.modulation.start(&s.params, s.age as u32);
         if s.region.start >= s.region.end.min(len) {
@@ -331,6 +352,54 @@ impl Voice {
 
     pub fn age(&self) -> u64 {
         self.age
+    }
+
+    pub fn instrument(&self) -> usize {
+        self.instrument
+    }
+
+    pub fn pitch(&self) -> u8 {
+        self.pitch
+    }
+
+    /// Fading out after a steal, cut or polyphony limit (no longer counts as sounding).
+    pub fn is_fading(&self) -> bool {
+        self.fade.is_some()
+    }
+
+    /// Released, or fading: no longer the note's main sound.
+    pub fn is_ending(&self) -> bool {
+        self.fade.is_some() || self.volume_env.is_releasing()
+    }
+
+    /// Fades out linearly over `frames` from the current level, ignoring the release
+    /// time. A voice that has not rendered a frame yet simply stops.
+    pub fn fade_out(&mut self, frames: u32) {
+        if self.sample.is_none() || self.fade.is_some() {
+            return;
+        }
+        if !self.sounded || frames == 0 {
+            self.sample = None;
+            return;
+        }
+        self.fade = Some((frames, frames));
+    }
+
+    /// Legato: slides the playback rate to `rate` over `frames` (exponentially, so evenly
+    /// in pitch), keeps the envelope running and takes the new note's length and pitch.
+    pub fn glide_to(&mut self, rate: f64, frames: u32, duration: Option<u64>, pitch: u8) {
+        self.pitch = pitch;
+        self.remaining = duration;
+        if frames == 0 || self.rate <= 0.0 || rate <= 0.0 {
+            self.rate = rate;
+            self.glide = None;
+        } else {
+            let step = (rate / self.rate).powf(1.0 / f64::from(frames));
+            self.glide = Some((frames, step, rate));
+        }
+        if self.remaining == Some(0) {
+            self.release();
+        }
     }
 
     /// Add up to `min(out_l.len(), out_r.len())` frames into the outputs.
@@ -366,11 +435,30 @@ impl Voice {
                 let (sl, sr) = m.filter.process(sl, sr);
 
                 let env = self.volume_env.tick();
-                let g = p.gain * env * m.volume;
+                let fade = match self.fade {
+                    Some((left, total)) => left as f32 / total as f32,
+                    None => 1.0,
+                };
+                let g = p.gain * env * m.volume * fade;
                 out_l[n] += sl * g * m.pan_l;
                 out_r[n] += sr * g * m.pan_r;
+                self.sounded = true;
                 advance(&mut self.pos, &mut self.dir, self.rate * m.rate_factor, &r);
+                if let Some((left, step, target)) = self.glide.as_mut() {
+                    *left -= 1;
+                    self.rate = if *left == 0 { *target } else { self.rate * *step };
+                    if *left == 0 {
+                        self.glide = None;
+                    }
+                }
 
+                if let Some((left, _)) = self.fade.as_mut() {
+                    *left -= 1;
+                    if *left == 0 {
+                        done = true;
+                        break;
+                    }
+                }
                 if self.volume_env.is_done() {
                     done = true;
                     break;

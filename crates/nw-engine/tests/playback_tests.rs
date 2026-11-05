@@ -29,6 +29,8 @@ fn region(start: usize, end: usize, mode: LoopMode, loop_start: usize, loop_end:
 fn voice_start(sample: Shared<SampleBuffer>, region: PlayRegion, duration: Option<u64>) -> VoiceStart {
     VoiceStart {
         sample,
+        instrument: 0,
+        pitch: 60,
         region,
         rate: 1.0,
         // Undo the centre-pan gain so left output equals the sample value.
