@@ -8,9 +8,11 @@ use basedrop::{Owned, Shared};
 use nw_core::{PPQ, Tick};
 
 use crate::sample::SampleBuffer;
-use crate::snapshot::{NoteEvent, Snapshot};
+use crate::snapshot::{InstrumentSnapshot, NoteEvent, Snapshot};
 use crate::process::PlayRegion;
-use crate::voice::{Voice, VoiceStart, tuned_rate};
+use crate::env::EnvParams;
+use crate::lfo::LfoParams;
+use crate::voice::{ModEnv, ModLfo, Voice, VoiceParams, VoiceStart, tuned_rate};
 
 pub const MAX_VOICES: usize = 64;
 /// Largest number of frames rendered in one pass; longer `out` slices are chunked.
@@ -102,10 +104,10 @@ impl EngineCore {
                     sample,
                     region,
                     rate,
-                    gain: PREVIEW_GAIN,
-                    pan: 0.0,
-                    attack_samples: 0,
-                    release_samples: self.ms_to_samples(PREVIEW_RELEASE_MS),
+                    params: VoiceParams {
+                        output_rate: self.output_rate,
+                        ..VoiceParams::simple(PREVIEW_GAIN, 0.0, 0, self.ms_to_samples(PREVIEW_RELEASE_MS))
+                    },
                     duration_samples: None,
                     age: 0,
                 };
@@ -259,13 +261,39 @@ impl EngineCore {
                 sample.sample_rate,
                 self.output_rate,
             ),
-            gain: f32::from(event.velocity) / 127.0 * inst.volume,
-            pan: inst.pan,
-            attack_samples: self.ms_to_samples(inst.attack_ms),
-            release_samples: self.ms_to_samples(inst.release_ms),
+            params: self.voice_params(inst, event.velocity),
             duration_samples: held.then(|| (f64::from(event.length) * spt).round() as u64),
             age: 0,
         })
+    }
+
+    /// Converts an instrument's settings for one note (milliseconds to samples, tempo-synced
+    /// LFO rates to Hz, velocity mappings applied).
+    fn voice_params(&self, inst: &InstrumentSnapshot, velocity: u8) -> VoiceParams {
+        let rate = self.output_rate;
+        let tempo = self.snapshot.tempo;
+        let v = f32::from(velocity) / 127.0;
+        let to_volume = inst.velocity.to_volume.clamp(0.0, 1.0);
+        let env = |m: &nw_core::ModEnvelope| ModEnv { env: EnvParams::from_envelope(&m.env, rate), amount: m.amount };
+        let lfo = |l: &nw_core::Lfo| ModLfo { lfo: LfoParams::from_lfo(l, tempo, rate), amount: l.amount };
+        VoiceParams {
+            // With the default full velocity mapping this is exactly `velocity/127 × volume`.
+            gain: (1.0 - to_volume + to_volume * v) * inst.volume,
+            pan: inst.pan,
+            volume_env: EnvParams::from_envelope(&inst.volume_env, rate),
+            filter: inst.filter.kind,
+            cutoff_hz: inst.filter.cutoff_hz,
+            resonance: inst.filter.resonance,
+            cutoff_offset: inst.velocity.to_cutoff_octaves * v,
+            cutoff_env: env(&inst.cutoff_env),
+            pitch_env: env(&inst.pitch_env),
+            pan_env: env(&inst.pan_env),
+            volume_lfo: lfo(&inst.volume_lfo),
+            pan_lfo: lfo(&inst.pan_lfo),
+            cutoff_lfo: lfo(&inst.cutoff_lfo),
+            pitch_lfo: lfo(&inst.pitch_lfo),
+            output_rate: rate,
+        }
     }
 
     /// Start a voice in a free slot, or steal the oldest. Returns `(index, age)`.

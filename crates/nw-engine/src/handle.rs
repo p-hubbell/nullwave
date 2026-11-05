@@ -118,7 +118,7 @@ fn build_stream(
     let stream = device.build_output_stream(
         config,
         move |data: &mut [f32], _| {
-            let body = || {
+            let mut body = || {
                 let started = Instant::now();
                 let frames = data.len() / channels;
                 if channels == 2 {
@@ -153,7 +153,7 @@ fn build_stream(
                 }
             };
             #[cfg(debug_assertions)]
-            assert_no_alloc::assert_no_alloc(body);
+            assert_no_alloc::assert_no_alloc(&mut body);
             #[cfg(not(debug_assertions))]
             body();
         },

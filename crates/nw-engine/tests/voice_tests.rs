@@ -1,7 +1,7 @@
 use basedrop::{Collector, Shared};
 use nw_engine::process::PlayRegion;
 use nw_engine::sample::SampleBuffer;
-use nw_engine::voice::{pan_gains, playback_rate, Voice, VoiceStart};
+use nw_engine::voice::{pan_gains, playback_rate, Voice, VoiceParams, VoiceStart};
 
 fn buf(c: &Collector, left: Vec<f32>) -> Shared<SampleBuffer> {
     let right = left.clone();
@@ -14,10 +14,7 @@ fn start(sample: Shared<SampleBuffer>) -> VoiceStart {
         sample,
         region,
         rate: 1.0,
-        gain: 0.5,
-        pan: 0.0,
-        attack_samples: 0,
-        release_samples: 0,
+        params: VoiceParams::simple(0.5, 0.0, 0, 0),
         duration_samples: None,
         age: 7,
     }
@@ -51,7 +48,7 @@ fn duration_triggers_release_then_silence() {
     let mut v = Voice::default();
     assert!(!v.is_active());
     let mut s = start(buf(&c, vec![1.0; 1000]));
-    s.release_samples = 50;
+    s.params.volume_env.release = 50;
     s.duration_samples = Some(100);
     v.start(s);
     assert!(v.is_active());
@@ -79,9 +76,9 @@ fn attack_ramps_from_zero() {
     let c = Collector::new();
     let mut v = Voice::default();
     let mut s = start(buf(&c, vec![1.0; 1000]));
-    s.attack_samples = 10;
-    s.gain = 1.0;
-    s.pan = -1.0;
+    s.params.volume_env.attack = 10;
+    s.params.gain = 1.0;
+    s.params.pan = -1.0;
     v.start(s);
     let mut l = vec![0.0; 20];
     let mut r = vec![0.0; 20];
@@ -99,10 +96,10 @@ fn release_during_attack_starts_from_current_level() {
     let c = Collector::new();
     let mut v = Voice::default();
     let mut s = start(buf(&c, vec![1.0; 1000]));
-    s.attack_samples = 100;
-    s.release_samples = 10;
-    s.gain = 1.0;
-    s.pan = -1.0;
+    s.params.volume_env.attack = 100;
+    s.params.volume_env.release = 10;
+    s.params.gain = 1.0;
+    s.params.pan = -1.0;
     v.start(s);
     let mut l = vec![0.0; 50];
     let mut r = vec![0.0; 50];
@@ -135,7 +132,7 @@ fn voice_ends_at_sample_end() {
     let c = Collector::new();
     let mut v = Voice::default();
     let mut s = start(buf(&c, vec![1.0; 10]));
-    s.gain = 1.0;
+    s.params.gain = 1.0;
     v.start(s);
     let mut l = vec![0.0; 30];
     let mut r = vec![0.0; 30];
@@ -151,8 +148,8 @@ fn interpolates_linearly() {
     let mut v = Voice::default();
     let mut s = start(buf(&c, vec![0.0, 1.0, 0.0, 0.0]));
     s.rate = 0.5;
-    s.gain = 1.0;
-    s.pan = -1.0;
+    s.params.gain = 1.0;
+    s.params.pan = -1.0;
     v.start(s);
     let mut l = vec![0.0; 3];
     let mut r = vec![0.0; 3];

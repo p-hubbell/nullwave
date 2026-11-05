@@ -2,13 +2,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use basedrop::{Collector, Owned, Shared};
-use nw_core::{Instrument, InstrumentId, Note, Pattern, PatternId, Project, Tick};
+use nw_core::{Envelope, Instrument, InstrumentId, Note, Pattern, PatternId, Project, Tick};
 use nw_engine::core::{Command, EngineCore, Feedback, MAX_VOICES, run_block};
 use nw_engine::process::PlayRegion;
 use nw_engine::sample::{SampleBuffer, SampleCache};
 use nw_engine::snapshot::{InstrumentSnapshot, NoteEvent, Snapshot, compile_snapshot};
 use nw_engine::voice::pan_gains;
 
+#[cfg(debug_assertions)]
 #[global_allocator]
 static A: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
@@ -25,18 +26,9 @@ fn dc(c: &Collector, frames: usize) -> Shared<SampleBuffer> {
 
 fn inst(sample: Option<Shared<SampleBuffer>>, release_ms: f32) -> InstrumentSnapshot {
     let region = PlayRegion::whole(sample.as_ref().map_or(0, |b| b.len()));
-    InstrumentSnapshot {
-        sample,
-        region,
-        one_shot: false,
-        root_note: 60,
-        coarse: 0,
-        fine_cents: 0.0,
-        attack_ms: 0.0,
-        release_ms,
-        volume: 1.0,
-        pan: 0.0,
-    }
+    let mut i = InstrumentSnapshot::new(sample, region);
+    i.volume_env = Envelope { release_ms, ..Envelope::default() };
+    i
 }
 
 fn ev(tick: Tick, length: Tick) -> NoteEvent {
@@ -172,8 +164,8 @@ fn compile_marks_missing_sample_as_none() {
     // Clamped inputs.
     assert_eq!(s.instruments[0].pan, 1.0);
     assert_eq!(s.instruments[0].volume, 1.0);
-    assert_eq!(s.instruments[0].attack_ms, 0.0);
-    assert_eq!(s.instruments[0].release_ms, 0.0);
+    assert_eq!(s.instruments[0].volume_env.attack_ms, 0.0);
+    assert_eq!(s.instruments[0].volume_env.release_ms, 0.0);
     // Notes are still emitted, sorted by tick.
     assert_eq!(s.events.len(), 2);
     assert_eq!(s.events[0], NoteEvent { tick: 0, instrument: 0, pitch: 60, velocity: 100, length: 480 });

@@ -841,9 +841,9 @@ The spec's "Sampler" section (revised 2026-11-04) defines every parameter, range
 
 **Interfaces:**
 - Produces:
-  - `EnvState` (DAHDSR, stepping per sample, with curves): `start(&EnvParams)`, `release()`, `next() -> f32`, `is_done()`. `EnvParams` holds the times in samples.
+  - `EnvState` (DAHDSR, stepping per sample, with curves): `start(EnvParams)`, `release()`, `tick() -> f32`, `is_done()`. `EnvParams` holds the times in samples.
   - `Svf`: a TPT state-variable filter. `set(kind, cutoff_hz, resonance, sample_rate)` and `process(l, r) -> (l, r)`.
-  - `LfoState`: `start(&LfoParams, seed)` and `next() -> f32` in −1..=1. Random (sample-and-hold) uses a per-voice xorshift with no allocation. Tempo-synced rates are converted to Hz at note start from the snapshot tempo.
+  - `LfoState`: `start(LfoParams, sample_rate, seed)`, `tick() -> f32` in −1..=1 and `step(n)` for control-rate updates. Random (sample-and-hold) uses a per-voice xorshift with no allocation. Tempo-synced rates are converted to Hz at note start from the snapshot tempo.
 - Behavior:
   - **Volume:** the volume envelope replaces the linear attack/release.
   - **Control rate:** cutoff, pitch and pan modulation (envelope + LFO + velocity → cutoff) are computed every 16 frames, and filter coefficients update then too. Volume is per sample.

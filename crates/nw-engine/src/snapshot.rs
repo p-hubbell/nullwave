@@ -2,11 +2,12 @@
 //! parameters plus the note events of one pattern, sorted by tick.
 
 use basedrop::Shared;
-use nw_core::{PatternId, Project, Tick};
+use nw_core::{Envelope, Filter, Lfo, ModEnvelope, PatternId, Project, Tick, VelocityMap};
 
 use crate::process::{PlayRegion, ProcessSettings};
 use crate::sample::{SampleBuffer, SampleCache};
 
+#[derive(Clone)]
 pub struct InstrumentSnapshot {
     /// The processed sample; `None` when there is no sample or it failed to load.
     pub sample: Option<Shared<SampleBuffer>>,
@@ -17,10 +18,44 @@ pub struct InstrumentSnapshot {
     pub root_note: u8,
     pub coarse: i8,
     pub fine_cents: f32,
-    pub attack_ms: f32,
-    pub release_ms: f32,
     pub volume: f32,
     pub pan: f32,
+    pub volume_env: Envelope,
+    pub filter: Filter,
+    pub cutoff_env: ModEnvelope,
+    pub pitch_env: ModEnvelope,
+    pub pan_env: ModEnvelope,
+    pub volume_lfo: Lfo,
+    pub pan_lfo: Lfo,
+    pub cutoff_lfo: Lfo,
+    pub pitch_lfo: Lfo,
+    pub velocity: VelocityMap,
+}
+
+impl InstrumentSnapshot {
+    /// Full volume, centred, root C4, and the model's default sampler settings.
+    pub fn new(sample: Option<Shared<SampleBuffer>>, region: PlayRegion) -> InstrumentSnapshot {
+        InstrumentSnapshot {
+            sample,
+            region,
+            one_shot: false,
+            root_note: 60,
+            coarse: 0,
+            fine_cents: 0.0,
+            volume: 1.0,
+            pan: 0.0,
+            volume_env: Envelope::default(),
+            filter: Filter::default(),
+            cutoff_env: ModEnvelope::default(),
+            pitch_env: ModEnvelope::default(),
+            pan_env: ModEnvelope::default(),
+            volume_lfo: Lfo::default(),
+            pan_lfo: Lfo::default(),
+            cutoff_lfo: Lfo::default(),
+            pitch_lfo: Lfo::default(),
+            velocity: VelocityMap::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,17 +97,32 @@ pub fn compile_snapshot(
             };
             (inst, sample, region)
         })
-        .map(|(inst, sample, region)| InstrumentSnapshot {
-            sample,
-            region,
-            one_shot: inst.sampler.one_shot,
-            root_note: inst.sampler.root_note,
-            coarse: inst.sampler.tune.coarse,
-            fine_cents: inst.sampler.tune.fine_cents,
-            attack_ms: inst.sampler.volume_env.attack_ms.max(0.0),
-            release_ms: inst.sampler.volume_env.release_ms.max(0.0),
-            volume: inst.volume.clamp(0.0, 1.0),
-            pan: inst.pan.clamp(-1.0, 1.0),
+        .map(|(inst, sample, region)| {
+            let s = &inst.sampler;
+            let mut volume_env = s.volume_env;
+            // Hand-edited files are validated on load, but keep the audio thread safe anyway.
+            volume_env.attack_ms = volume_env.attack_ms.max(0.0);
+            volume_env.release_ms = volume_env.release_ms.max(0.0);
+            InstrumentSnapshot {
+                sample,
+                region,
+                one_shot: s.one_shot,
+                root_note: s.root_note,
+                coarse: s.tune.coarse,
+                fine_cents: s.tune.fine_cents,
+                volume: inst.volume.clamp(0.0, 1.0),
+                pan: inst.pan.clamp(-1.0, 1.0),
+                volume_env,
+                filter: s.filter,
+                cutoff_env: s.cutoff_env,
+                pitch_env: s.pitch_env,
+                pan_env: s.pan_env,
+                volume_lfo: s.volume_lfo,
+                pan_lfo: s.pan_lfo,
+                cutoff_lfo: s.cutoff_lfo,
+                pitch_lfo: s.pitch_lfo,
+                velocity: s.velocity,
+            }
         })
         .collect();
 

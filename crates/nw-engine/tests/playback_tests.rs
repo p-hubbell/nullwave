@@ -6,8 +6,9 @@ use nw_engine::core::{Command, EngineCore};
 use nw_engine::process::PlayRegion;
 use nw_engine::sample::SampleBuffer;
 use nw_engine::snapshot::{InstrumentSnapshot, NoteEvent, Snapshot};
-use nw_engine::voice::{Voice, VoiceStart, tuned_rate};
+use nw_engine::voice::{Voice, VoiceParams, VoiceStart, tuned_rate};
 
+#[cfg(debug_assertions)]
 #[global_allocator]
 static A: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
@@ -31,10 +32,7 @@ fn voice_start(sample: Shared<SampleBuffer>, region: PlayRegion, duration: Optio
         region,
         rate: 1.0,
         // Undo the centre-pan gain so left output equals the sample value.
-        gain: std::f32::consts::SQRT_2,
-        pan: 0.0,
-        attack_samples: 0,
-        release_samples: 0,
+        params: VoiceParams::simple(std::f32::consts::SQRT_2, 0.0, 0, 0),
         duration_samples: duration,
         age: 0,
     }
@@ -98,7 +96,7 @@ fn loop_keeps_running_through_release() {
     let c = Collector::new();
     let mut v = Voice::default();
     let mut s = voice_start(ramp(&c, 1000), region(0, 1000, LoopMode::Forward, 10, 20), Some(30));
-    s.release_samples = 100;
+    s.params.volume_env.release = 100;
     v.start(s);
     let out = run(&mut v, 200);
     assert!(out[60] != 0.0, "still sounding during release, past the loop end");
@@ -128,18 +126,10 @@ fn coarse_and_fine_tune_change_rate() {
 }
 
 fn inst(sample: Shared<SampleBuffer>, region: PlayRegion, one_shot: bool) -> InstrumentSnapshot {
-    InstrumentSnapshot {
-        sample: Some(sample),
-        region,
-        one_shot,
-        root_note: 60,
-        coarse: 0,
-        fine_cents: 0.0,
-        attack_ms: 0.0,
-        release_ms: 0.0,
-        volume: 1.0,
-        pan: 0.0,
-    }
+    let mut i = InstrumentSnapshot::new(Some(sample), region);
+    i.one_shot = one_shot;
+    i.volume_env.release_ms = 0.0;
+    i
 }
 
 fn play_one_note(instrument: InstrumentSnapshot, length: Tick, frames: usize) -> Vec<f32> {
