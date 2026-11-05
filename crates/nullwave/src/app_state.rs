@@ -533,6 +533,12 @@ impl AppState {
         .detach();
     }
 
+    /// Sounds one note through instrument `id` (e.g. when placing or clicking a note).
+    pub fn preview_note(&mut self, id: &InstrumentId, pitch: u8, velocity: u8, length: Tick) {
+        let Some(instrument) = self.project.instrument_index(id) else { return };
+        self.send(Command::PreviewNote { instrument, pitch, velocity, length });
+    }
+
     /// Plays `path` once through the preview voice, replacing any preview already sounding.
     /// The file loads on the background executor; a later click wins over a slower load.
     pub fn preview_sample(&mut self, path: PathBuf, cx: &mut Context<Self>) {

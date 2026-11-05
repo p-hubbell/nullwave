@@ -13,6 +13,7 @@ use crate::app_state::AppState;
 use crate::theme;
 use crate::ui::components::{TextField, TextFieldEvent};
 use crate::ui::instrument_tab::SliderDrag;
+use crate::ui::piano_roll::Rolls;
 use crate::ui::sidebar::SidebarState;
 use crate::ui::{bottom_panel, editor_area, sidebar, status_bar};
 
@@ -43,6 +44,8 @@ pub struct Shell {
     rename_subscription: Option<Subscription>,
     /// An instrument-tab slider drag in progress.
     pub slider: Option<SliderDrag>,
+    /// State of each open piano roll tab (view, selection, drag).
+    pub rolls: Rolls,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -52,7 +55,10 @@ impl Shell {
             TextField::new("", "Search patterns, instruments, samples", |_| true, window, cx)
         });
         let subscriptions = vec![
-            cx.observe(&state, |_, _, cx| cx.notify()),
+            cx.observe(&state, |shell, _, cx| {
+                shell.sync_rolls(cx);
+                cx.notify();
+            }),
             cx.subscribe_in(&search_field, window, Self::on_search_event),
         ];
         let mut shell = Shell {
@@ -67,8 +73,10 @@ impl Shell {
             pattern_rename: None,
             rename_subscription: None,
             slider: None,
+            rolls: Rolls::new(),
             _subscriptions: subscriptions,
         };
+        shell.sync_rolls(cx);
         if shell.state.read(cx).workspace.sidebar_view == SidebarView::Search {
             shell.refresh_search_index(cx);
         }

@@ -25,6 +25,9 @@ pub enum Command {
     Play,
     Stop,
     Preview(Shared<SampleBuffer>),
+    /// Plays one note through instrument `instrument` of the current snapshot, as the
+    /// preview voice (replacing any preview already sounding). Works while stopped.
+    PreviewNote { instrument: usize, pitch: u8, velocity: u8, length: Tick },
     StopPreview,
 }
 
@@ -104,6 +107,13 @@ impl EngineCore {
                     age: 0,
                 };
                 self.preview = Some(self.start_voice(start));
+            }
+            Command::PreviewNote { instrument, pitch, velocity, length } => {
+                self.release_preview();
+                let event = NoteEvent { tick: 0, instrument, pitch, velocity, length };
+                if let Some(start) = self.note_start(event, self.samples_per_tick()) {
+                    self.preview = Some(self.start_voice(start));
+                }
             }
             Command::StopPreview => self.release_preview(),
         }
@@ -224,9 +234,16 @@ impl EngineCore {
     }
 
     fn fire(&mut self, event: NoteEvent, spt: f64) {
-        let Some(inst) = self.snapshot.instruments.get(event.instrument) else { return };
-        let Some(sample) = inst.sample.as_ref() else { return };
-        let start = VoiceStart {
+        if let Some(start) = self.note_start(event, spt) {
+            self.start_voice(start);
+        }
+    }
+
+    /// How `event` sounds through its instrument; `None` if that has no sample.
+    fn note_start(&self, event: NoteEvent, spt: f64) -> Option<VoiceStart> {
+        let inst = self.snapshot.instruments.get(event.instrument)?;
+        let sample = inst.sample.as_ref()?;
+        Some(VoiceStart {
             sample: sample.clone(),
             rate: playback_rate(event.pitch, inst.root_note, sample.sample_rate, self.output_rate),
             gain: f32::from(event.velocity) / 127.0 * inst.volume,
@@ -235,8 +252,7 @@ impl EngineCore {
             release_samples: self.ms_to_samples(inst.release_ms),
             duration_samples: Some((f64::from(event.length) * spt).round() as u64),
             age: 0,
-        };
-        self.start_voice(start);
+        })
     }
 
     /// Start a voice in a free slot, or steal the oldest. Returns `(index, age)`.

@@ -373,3 +373,35 @@ fn snapshot_swap_keeps_pending_event_with_fractional_spt() {
     let out = render(&mut core, 2400, 2400);
     assert_eq!(first_nonzero(&out), Some(2344));
 }
+
+#[test]
+fn preview_note_plays_through_instrument_for_its_length() {
+    let c = Collector::new();
+    let s = snap(&c, 120.0, 3840, vec![inst(Some(dc(&c, 100_000)), 0.0)], vec![]);
+    let mut core = EngineCore::new(RATE, s);
+    core.handle(Command::PreviewNote { instrument: 0, pitch: 60, velocity: 127, length: 10 });
+    let out = render(&mut core, 1000, 256);
+    assert_eq!(first_nonzero(&out), Some(0));
+    // Sounds for 10 ticks (250 frames) with no release, then is silent.
+    assert!(out[249] != 0.0);
+    assert!(out[300..].iter().all(|x| *x == 0.0));
+}
+
+#[test]
+fn preview_note_replaces_previous_and_ignores_bad_instrument() {
+    let c = Collector::new();
+    let s = snap(&c, 120.0, 3840, vec![inst(Some(dc(&c, 100_000)), 0.0)], vec![]);
+    let mut core = EngineCore::new(RATE, s);
+    // Unknown instrument: nothing sounds, nothing panics.
+    core.handle(Command::PreviewNote { instrument: 7, pitch: 60, velocity: 127, length: 1000 });
+    assert!(render(&mut core, 100, 100).iter().all(|x| *x == 0.0));
+    core.handle(Command::PreviewNote { instrument: 0, pitch: 60, velocity: 127, length: 1000 });
+    core.handle(Command::PreviewNote { instrument: 0, pitch: 60, velocity: 127, length: 1000 });
+    // The second preview releases the first (release 0 ms), leaving one voice.
+    let out = render(&mut core, 100, 100);
+    assert!(out[50] > 0.0);
+    assert_eq!(core.active_voices(), 1);
+    core.handle(Command::StopPreview);
+    let out = render(&mut core, 100, 100);
+    assert_eq!(out[99], 0.0);
+}

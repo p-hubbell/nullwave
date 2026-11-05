@@ -8,7 +8,7 @@ use crate::actions::project;
 use crate::app_state::AppState;
 use crate::theme;
 use crate::ui::components::button;
-use crate::ui::{instrument_tab, pattern_tab};
+use crate::ui::{instrument_tab, pattern_tab, piano_roll};
 use crate::ui::shell::Shell;
 
 pub fn render(shell: &Shell, cx: &Context<Shell>) -> AnyElement {
@@ -53,7 +53,7 @@ fn render_pane(shell: &Shell, state: &AppState, pane: usize, cx: &Context<Shell>
     let body = match p.active.and_then(|a| p.tabs.get(a)) {
         Some(TabKind::Pattern(id)) => pattern_tab::render(shell, state, id),
         Some(TabKind::Instrument(id)) => instrument_tab::render(shell, state, id, cx),
-        Some(tab) => placeholder_editor(state, tab),
+        Some(TabKind::PianoRoll(p, i)) => piano_roll::render(shell, state, &(p.clone(), i.clone()), cx),
         None => empty_pane().into_any_element(),
     };
     div()
@@ -149,18 +149,4 @@ fn empty_pane() -> impl IntoElement {
         .justify_center()
         .text_color(theme::text_faint())
         .child("Open a pattern from the sidebar")
-}
-
-/// Stand-in for the piano roll until it exists.
-fn placeholder_editor(state: &AppState, tab: &TabKind) -> AnyElement {
-    div()
-        .size_full()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(6.))
-        .child(div().text_color(theme::text_strong()).child(tab_title(tab, &state.project)))
-        .child(div().text_color(theme::text_faint()).child("Piano roll editor — coming soon"))
-        .into_any_element()
 }

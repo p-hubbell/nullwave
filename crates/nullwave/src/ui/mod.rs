@@ -5,6 +5,7 @@ pub mod components;
 pub mod editor_area;
 pub mod instrument_tab;
 pub mod pattern_tab;
+pub mod piano_roll;
 pub mod shell;
 pub mod sidebar;
 pub mod status_bar;
