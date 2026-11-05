@@ -55,9 +55,9 @@ fn all_edits(p: &Project) -> Vec<Edit> {
         Edit::AddNotes { pattern: pid("pattern-1"), instrument: iid("snare"), notes: vec![note(61, 5), note(60, 0)] },
         Edit::RemoveNotes { pattern: pid("pattern-1"), instrument: iid("snare"), notes: vec![note(60, 0)] },
         Edit::ReplaceNotes { pattern: pid("pattern-1"), instrument: iid("snare"), before: vec![note(60, 0)], after: vec![note(72, 960)] },
-        Edit::AddInstrument { instrument: Instrument::new(iid("hat"), "Hat"), index: 1 },
+        Edit::AddInstrument { instrument: Box::new(Instrument::new(iid("hat"), "Hat")), index: 1 },
         remove_instrument_edit(p, &iid("snare")).unwrap(),
-        Edit::UpdateInstrument { before: p.instruments[0].clone(), after: { let mut i = p.instruments[0].clone(); i.volume = 0.1; i } },
+        Edit::UpdateInstrument { before: Box::new(p.instruments[0].clone()), after: Box::new({ let mut i = p.instruments[0].clone(); i.volume = 0.1; i }) },
         Edit::AddPattern { pattern: pat("pattern-2"), index: 1 },
         Edit::RemovePattern { pattern: p.patterns[0].clone(), index: 0 },
         Edit::RenamePattern { id: pid("pattern-1"), before: "pattern-1".into(), after: "verse".into() },
@@ -150,11 +150,11 @@ fn touched_paths() {
     );
     let inst = Instrument::new(iid("i"), "I");
     assert_eq!(
-        Edit::UpdateInstrument { before: inst.clone(), after: inst.clone() }.touched(),
+        Edit::UpdateInstrument { before: Box::new(inst.clone()), after: Box::new(inst.clone()) }.touched(),
         vec![DocPath::Instrument(iid("i"))]
     );
     assert_eq!(
-        Edit::AddInstrument { instrument: inst.clone(), index: 0 }.touched(),
+        Edit::AddInstrument { instrument: Box::new(inst.clone()), index: 0 }.touched(),
         vec![DocPath::Song, DocPath::Instrument(iid("i"))]
     );
     let mut pt = pat("p");

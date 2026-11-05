@@ -158,15 +158,19 @@ fn loop_outside_region_is_invalid() {
 
 #[test]
 fn loop_points_are_not_checked_while_loop_is_off() {
-    let mut s = Sampler::default();
-    s.region = Region { start: 0.5, end: 1.0 };
-    s.looping = Loop { mode: LoopMode::Off, start: 0.0, end: 0.1, crossfade_ms: 0.0 };
+    let s = Sampler {
+        region: Region { start: 0.5, end: 1.0 },
+        looping: Loop { mode: LoopMode::Off, start: 0.0, end: 0.1, crossfade_ms: 0.0 },
+        ..Sampler::default()
+    };
     assert_eq!(s.validate(), Ok(()));
 }
 
+type Case = (Box<dyn FnOnce(&mut Sampler)>, &'static str);
+
 #[test]
 fn out_of_range_values_are_invalid() {
-    let cases: Vec<(Box<dyn FnOnce(&mut Sampler)>, &str)> = vec![
+    let cases: Vec<Case> = vec![
         (Box::new(|s| s.root_note = 128), "root_note"),
         (Box::new(|s| s.region.end = 1.5), "region"),
         (Box::new(|s| s.looping.crossfade_ms = 600.0), "crossfade_ms"),
@@ -211,9 +215,7 @@ fn out_of_range_values_are_invalid() {
 
 #[test]
 fn edge_values_are_valid() {
-    let mut s = Sampler::default();
-    s.root_note = 127;
-    s.tune = Tune { coarse: -24, fine_cents: 100.0 };
+    let mut s = Sampler { root_note: 127, tune: Tune { coarse: -24, fine_cents: 100.0 }, ..Sampler::default() };
     s.volume_env.attack_ms = 5000.0;
     s.volume_env.attack_curve = -1.0;
     s.filter = Filter { kind: FilterKind::Notch, cutoff_hz: 20_000.0, resonance: 1.0 };

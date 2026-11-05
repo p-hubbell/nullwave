@@ -9,7 +9,8 @@ use nw_core::{PPQ, Tick};
 
 use crate::sample::SampleBuffer;
 use crate::snapshot::{NoteEvent, Snapshot};
-use crate::voice::{Voice, VoiceStart, playback_rate};
+use crate::process::PlayRegion;
+use crate::voice::{Voice, VoiceStart, tuned_rate};
 
 pub const MAX_VOICES: usize = 64;
 /// Largest number of frames rendered in one pass; longer `out` slices are chunked.
@@ -96,8 +97,10 @@ impl EngineCore {
             Command::Preview(sample) => {
                 self.release_preview();
                 let rate = f64::from(sample.sample_rate) / f64::from(self.output_rate);
+                let region = PlayRegion::whole(sample.left.len().min(sample.right.len()));
                 let start = VoiceStart {
                     sample,
+                    region,
                     rate,
                     gain: PREVIEW_GAIN,
                     pan: 0.0,
@@ -243,14 +246,24 @@ impl EngineCore {
     fn note_start(&self, event: NoteEvent, spt: f64) -> Option<VoiceStart> {
         let inst = self.snapshot.instruments.get(event.instrument)?;
         let sample = inst.sample.as_ref()?;
+        // One-shot plays the whole region, but a loop always ends with the note.
+        let held = !inst.one_shot || inst.region.is_looping();
         Some(VoiceStart {
             sample: sample.clone(),
-            rate: playback_rate(event.pitch, inst.root_note, sample.sample_rate, self.output_rate),
+            region: inst.region,
+            rate: tuned_rate(
+                event.pitch,
+                inst.root_note,
+                inst.coarse,
+                inst.fine_cents,
+                sample.sample_rate,
+                self.output_rate,
+            ),
             gain: f32::from(event.velocity) / 127.0 * inst.volume,
             pan: inst.pan,
             attack_samples: self.ms_to_samples(inst.attack_ms),
             release_samples: self.ms_to_samples(inst.release_ms),
-            duration_samples: Some((f64::from(event.length) * spt).round() as u64),
+            duration_samples: held.then(|| (f64::from(event.length) * spt).round() as u64),
             age: 0,
         })
     }

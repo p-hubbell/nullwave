@@ -1,12 +1,14 @@
 //! Sample loading: decode audio files to stereo f32 buffers and cache them
 //! as `basedrop::Shared` so the audio thread can hold them without freeing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use basedrop::{Handle, Shared};
+
+use crate::process::{PlayRegion, ProcessKey, ProcessSettings, process_sample};
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::probe::Hint;
@@ -122,16 +124,53 @@ pub fn load_sample(path: &Path) -> Result<SampleBuffer, SampleError> {
     Ok(SampleBuffer { sample_rate, left, right })
 }
 
-/// Caches loaded samples (and load failures) keyed on the path as given.
-/// Not for use on the audio thread.
+type ProcessedKey = (PathBuf, ProcessKey);
+
+/// Caches loaded samples (and load failures) keyed on the path as given, plus their
+/// processed versions keyed on path and settings. Not for use on the audio thread.
 pub struct SampleCache {
     handle: Handle,
     entries: HashMap<PathBuf, Result<Shared<SampleBuffer>, SampleError>>,
+    processed: HashMap<ProcessedKey, (Shared<SampleBuffer>, PlayRegion)>,
+    /// Processed entries used since `begin_pass`, while a pass is running.
+    used: Option<HashSet<ProcessedKey>>,
 }
 
 impl SampleCache {
     pub fn new(handle: Handle) -> Self {
-        Self { handle, entries: HashMap::new() }
+        Self { handle, entries: HashMap::new(), processed: HashMap::new(), used: None }
+    }
+
+    /// The sample at `path` with `settings` applied, computed once per distinct settings.
+    pub fn processed(
+        &mut self,
+        path: &Path,
+        settings: &ProcessSettings,
+    ) -> Result<(Shared<SampleBuffer>, PlayRegion), SampleError> {
+        let key = (path.to_path_buf(), settings.key());
+        if let Some(used) = &mut self.used {
+            used.insert(key.clone());
+        }
+        if let Some((buffer, region)) = self.processed.get(&key) {
+            return Ok((buffer.clone(), *region));
+        }
+        let source = self.get(path)?;
+        let out = process_sample(&source, settings);
+        let entry = (Shared::new(&self.handle, out.buffer), out.region);
+        self.processed.insert(key, entry.clone());
+        Ok(entry)
+    }
+
+    /// Starts recording which processed entries are used (by one snapshot compile).
+    pub fn begin_pass(&mut self) {
+        self.used = Some(HashSet::new());
+    }
+
+    /// Drops processed entries not used since `begin_pass`, so memory follows the project.
+    pub fn end_pass(&mut self) {
+        if let Some(used) = self.used.take() {
+            self.processed.retain(|k, _| used.contains(k));
+        }
     }
 
     pub fn get(&mut self, path: &Path) -> Result<Shared<SampleBuffer>, SampleError> {
@@ -150,5 +189,6 @@ impl SampleCache {
 
     pub fn invalidate(&mut self, path: &Path) {
         self.entries.remove(path);
+        self.processed.retain(|(p, _), _| p != path);
     }
 }

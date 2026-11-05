@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use basedrop::{Collector, Owned, Shared};
 use nw_core::{Instrument, InstrumentId, Note, Pattern, PatternId, Project, Tick};
 use nw_engine::core::{Command, EngineCore, Feedback, MAX_VOICES, run_block};
+use nw_engine::process::PlayRegion;
 use nw_engine::sample::{SampleBuffer, SampleCache};
 use nw_engine::snapshot::{InstrumentSnapshot, NoteEvent, Snapshot, compile_snapshot};
 use nw_engine::voice::pan_gains;
@@ -23,7 +24,19 @@ fn dc(c: &Collector, frames: usize) -> Shared<SampleBuffer> {
 }
 
 fn inst(sample: Option<Shared<SampleBuffer>>, release_ms: f32) -> InstrumentSnapshot {
-    InstrumentSnapshot { sample, root_note: 60, attack_ms: 0.0, release_ms, volume: 1.0, pan: 0.0 }
+    let region = PlayRegion::whole(sample.as_ref().map_or(0, |b| b.len()));
+    InstrumentSnapshot {
+        sample,
+        region,
+        one_shot: false,
+        root_note: 60,
+        coarse: 0,
+        fine_cents: 0.0,
+        attack_ms: 0.0,
+        release_ms,
+        volume: 1.0,
+        pan: 0.0,
+    }
 }
 
 fn ev(tick: Tick, length: Tick) -> NoteEvent {

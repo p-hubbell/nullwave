@@ -1,4 +1,5 @@
 use basedrop::{Collector, Shared};
+use nw_engine::process::PlayRegion;
 use nw_engine::sample::SampleBuffer;
 use nw_engine::voice::{pan_gains, playback_rate, Voice, VoiceStart};
 
@@ -8,8 +9,10 @@ fn buf(c: &Collector, left: Vec<f32>) -> Shared<SampleBuffer> {
 }
 
 fn start(sample: Shared<SampleBuffer>) -> VoiceStart {
+    let region = PlayRegion::whole(sample.len());
     VoiceStart {
         sample,
+        region,
         rate: 1.0,
         gain: 0.5,
         pan: 0.0,

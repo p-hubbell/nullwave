@@ -104,7 +104,7 @@ One audio file per sampler instrument, played from the piano roll, pitched acros
 - **Region:** start and end points, stored as fractions (0–1) of the file's length so they survive the file being re-exported at another length; start < end.
 - **Loop:** off, forward or ping-pong, with loop start and end inside the region and a crossfade (0–500 ms) at the forward loop point so it doesn't click.
 - **One-shot vs. held:** held (default, today's behaviour) ends the sound at the note's end and then releases; one-shot plays the whole region regardless of note length. With a loop on, the note's end always ends the sound.
-- **Sample processing** (FL's "precomputed effects"): reverse, normalize, invert polarity, swap stereo, and declick (short fades at region and loop edges, on by default). These are computed off the audio thread when the sample or setting changes, never per note.
+- **Sample processing** (FL's "precomputed effects"): reverse, normalize, invert polarity, swap stereo, and declick (on by default: a short fade-in where the start is trimmed into the waveform, a fade-out at the region end, and a short seam crossfade on forward loops; an untrimmed start keeps its transient). These are computed off the audio thread when the sample or setting changes, never per note.
 - **Pitch:** root note (0–127), coarse tune (±24 semitones) and fine tune (±100 cents).
 
 **B. Envelopes, filter and modulation**

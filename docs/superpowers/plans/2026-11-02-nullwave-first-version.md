@@ -797,13 +797,14 @@ The spec's "Sampler" section (revised 2026-11-04) defines every parameter, range
 **Files:**
 - Create: `crates/nw-engine/src/process.rs`
 - Modify: `crates/nw-engine/src/{voice.rs,snapshot.rs,core.rs,lib.rs}`
-- Test: `crates/nw-engine/tests/process_tests.rs`, `crates/nw-engine/tests/playback_tests.rs`
+- Test: `crates/nw-engine/tests/process_tests.rs`, `crates/nw-engine/tests/playback_tests.rs`, `crates/nw-engine/tests/sample_tests.rs` (processed cache)
 
 **Interfaces:**
 - Produces:
-  - `process_sample(source: &SampleBuffer, settings: &ProcessSettings, output_rate: u32) -> ProcessedSample`, which runs off the audio thread. `ProcessSettings` holds `Processing`, `Region` and `Loop`. `ProcessedSample { buffer: SampleBuffer, start: usize, end: usize, loop_start: usize, loop_end: usize }` are frame indices into the processed buffer. Reverse, polarity, stereo swap, normalize (peak to 1.0 over the region), declick (2 ms fades at the region edges and, for loops, at the loop end) and the forward-loop crossfade are baked into `buffer`.
-  - `ProcessedCache`, keyed by `(path, ProcessSettings)`, built on `SampleCache`. `compile_snapshot` marks the entries it uses and drops the rest, so memory follows the project.
-  - `VoiceParams`: a `Copy` struct with everything a voice needs from the instrument and note. `VoiceStart` carries `Shared<ProcessedSample>` plus `VoiceParams`.
+  - `process_sample(source: &SampleBuffer, settings: &ProcessSettings) -> ProcessedSample`, which runs off the audio thread. `ProcessSettings` holds `Processing`, `Region` and `Loop`. `ProcessedSample { buffer: SampleBuffer, region: PlayRegion }`, where `PlayRegion { start, end, loop_mode, loop_start, loop_end }` is a `Copy` struct of frame indices into the processed buffer. Reverse, polarity, stereo swap, normalize (peak to 1.0 over the region), declick and the forward-loop crossfade are baked into `buffer`. Declick means a 2 ms fade-in only where the start is trimmed into the waveform, a fade-out at the region end when no loop is on, and a 2 ms seam crossfade on forward loops without one.
+  - `SampleCache::processed(path, &ProcessSettings) -> (Shared<SampleBuffer>, PlayRegion)` caches by path and settings. `compile_snapshot` brackets its lookups with `begin_pass` / `end_pass`, which drops unused entries, so memory follows the project; `invalidate(path)` drops a file's processed versions too.
+  - Voices keep playing a plain `Shared<SampleBuffer>`, and `VoiceStart` gains a `region: PlayRegion`, so raw sidebar previews still need no allocation (they use `PlayRegion::whole`). `tuned_rate(pitch, root, coarse, fine_cents, sample_rate, output_rate)` adds tuning. `InstrumentSnapshot` gains `region`, `one_shot`, `coarse` and `fine_cents`.
+  - `Edit`'s instrument variants hold `Box<Instrument>`, so every undo step isn't sized for a full sampler.
 - Behavior:
   - Playback starts at `start` and stops at `end`.
   - **Loop modes:** forward jumps from `loop_end` to `loop_start`; ping-pong reverses direction at each loop edge.

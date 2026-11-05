@@ -121,3 +121,42 @@ fn cache_returns_same_buffer_and_caches_failure() {
     let c = cache.get(&p).unwrap();
     assert!(!std::ptr::eq(&*a, &*c));
 }
+
+#[test]
+fn processed_cache_reuses_and_drops_unused() {
+    use nw_core::{Loop, Processing, Region};
+    use nw_engine::process::ProcessSettings;
+
+    let dir = TempDir::new().unwrap();
+    let p = write_wav(&dir, "p.wav", 44100, 1, 1000);
+    let collector = Collector::new();
+    let mut cache = SampleCache::new(collector.handle());
+    let plain = ProcessSettings { processing: Processing::default(), region: Region::default(), looping: Loop::default() };
+    let reversed = ProcessSettings { processing: Processing { reverse: true, ..Processing::default() }, ..plain };
+
+    let (a, ra) = cache.processed(&p, &plain).unwrap();
+    let (b, _) = cache.processed(&p, &plain).unwrap();
+    assert!(std::ptr::eq(&*a, &*b), "same settings share one processed buffer");
+    let (r, rr) = cache.processed(&p, &reversed).unwrap();
+    assert!(!std::ptr::eq(&*a, &*r));
+    assert_eq!(ra, rr);
+    // Away from the declicked edges, the reversed buffer mirrors the plain one.
+    assert_eq!(r.left[300], a.left[699]);
+
+    // A compile pass that only uses `plain` drops `reversed`.
+    cache.begin_pass();
+    let (a2, _) = cache.processed(&p, &plain).unwrap();
+    cache.end_pass();
+    assert!(std::ptr::eq(&*a, &*a2));
+    let (r2, _) = cache.processed(&p, &reversed).unwrap();
+    assert!(!std::ptr::eq(&*r, &*r2), "reversed was dropped and rebuilt");
+
+    // Invalidating the file drops its processed versions too.
+    cache.invalidate(&p);
+    let (a3, _) = cache.processed(&p, &plain).unwrap();
+    assert!(!std::ptr::eq(&*a, &*a3));
+
+    // Missing files report the load error.
+    let missing = dir.path().join("nope.wav");
+    assert!(matches!(cache.processed(&missing, &plain), Err(SampleError::NotFound(_))));
+}

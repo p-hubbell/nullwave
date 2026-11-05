@@ -14,11 +14,13 @@ pub enum Edit {
     RemoveNotes { pattern: PatternId, instrument: InstrumentId, notes: Vec<Note> },
     /// Move, resize, velocity.
     ReplaceNotes { pattern: PatternId, instrument: InstrumentId, before: Vec<Note>, after: Vec<Note> },
-    AddInstrument { instrument: Instrument, index: usize },
-    RemoveInstrument { instrument: Instrument, index: usize, notes: Vec<(PatternId, Vec<Note>)> },
+    // Instruments are boxed: a sampler's settings are large, and every undo step
+    // (including note edits) would otherwise be sized for them.
+    AddInstrument { instrument: Box<Instrument>, index: usize },
+    RemoveInstrument { instrument: Box<Instrument>, index: usize, notes: Vec<(PatternId, Vec<Note>)> },
     /// Inverse of `RemoveInstrument`: re-adds the instrument together with its notes.
-    RestoreInstrument { instrument: Instrument, index: usize, notes: Vec<(PatternId, Vec<Note>)> },
-    UpdateInstrument { before: Instrument, after: Instrument },
+    RestoreInstrument { instrument: Box<Instrument>, index: usize, notes: Vec<(PatternId, Vec<Note>)> },
+    UpdateInstrument { before: Box<Instrument>, after: Box<Instrument> },
     AddPattern { pattern: Pattern, index: usize },
     RemovePattern { pattern: Pattern, index: usize },
     RenamePattern { id: PatternId, before: String, after: String },
@@ -80,7 +82,7 @@ impl Edit {
             }
             Edit::UpdateInstrument { before, after } => {
                 if let Some(i) = project.instrument_mut(&before.id) {
-                    *i = after.clone();
+                    *i = (**after).clone();
                 }
             }
             Edit::AddPattern { pattern, index } => {
@@ -164,5 +166,5 @@ pub fn remove_instrument_edit(project: &Project, id: &InstrumentId) -> Option<Ed
         .iter()
         .filter_map(|p| p.notes.get(id).filter(|n| !n.is_empty()).map(|n| (p.id.clone(), n.clone())))
         .collect();
-    Some(Edit::RemoveInstrument { instrument: project.instruments[index].clone(), index, notes })
+    Some(Edit::RemoveInstrument { instrument: Box::new(project.instruments[index].clone()), index, notes })
 }

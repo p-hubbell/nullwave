@@ -753,7 +753,7 @@ impl AppState {
         let mut instrument = Instrument::new(id, name);
         instrument.sampler.sample_path = Some(path);
         let index = self.project.instruments.len();
-        self.apply(vec![Edit::AddInstrument { instrument, index }], cx);
+        self.apply(vec![Edit::AddInstrument { instrument: Box::new(instrument), index }], cx);
     }
 
     /// Points instrument `id` at a different sample file.
@@ -769,7 +769,7 @@ impl AppState {
     /// Commits one `UpdateInstrument` step (nothing if unchanged).
     pub fn update_instrument(&mut self, before: Instrument, after: Instrument, cx: &mut Context<Self>) {
         if before != after {
-            self.apply(vec![Edit::UpdateInstrument { before, after }], cx);
+            self.apply(vec![Edit::UpdateInstrument { before: Box::new(before), after: Box::new(after) }], cx);
         }
     }
 
