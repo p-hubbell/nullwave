@@ -26,7 +26,10 @@ fn main() {
     Application::new().run(|cx: &mut App| {
         let state = cx.new(AppState::new);
         install_key_bindings(&state, cx);
-        cx.on_action(|_: &actions::app::Quit, cx| cx.quit());
+        let quit_state = state.clone();
+        cx.on_action(move |_: &actions::app::Quit, cx| {
+            quit_state.update(cx, |s, cx| s.request_quit(cx));
+        });
         cx.set_menus(vec![Menu {
             name: "Nullwave".into(),
             items: vec![MenuItem::action("Quit Nullwave", actions::app::Quit)],
@@ -50,6 +53,12 @@ fn main() {
             ..Default::default()
         };
         let window = cx.open_window(options, |window, cx| {
+            // Closing the window goes through the same unsaved-changes prompt as ⌘Q.
+            let close_state = state.clone();
+            window.on_window_should_close(cx, move |_, cx| {
+                close_state.update(cx, |s, cx| s.request_quit(cx));
+                false
+            });
             let state = state.clone();
             cx.new(|cx| Shell::new(state, window, cx))
         });
@@ -57,6 +66,8 @@ fn main() {
             Ok(window) => {
                 let focused = window.update(cx, |shell, window, cx| {
                     window.focus(&shell.focus_handle(cx));
+                    // A prompt from launch (e.g. crash recovery) takes the focus.
+                    shell.sync_modal_focus(window, cx);
                     cx.activate(true);
                 });
                 if let Err(e) = focused {
@@ -91,20 +102,21 @@ fn install_key_bindings(state: &Entity<AppState>, cx: &mut App) {
             None
         }
     };
-    let user = merged.map(|bindings| to_key_bindings(&bindings, cx));
-    let keys = match user {
-        Some(Ok(keys)) => {
+    let user = merged.map(|bindings| (to_key_bindings(&bindings, cx), bindings));
+    let (keys, in_effect) = match user {
+        Some((Ok(keys), bindings)) => {
             log.push(format!("Key bindings loaded from {}", path.display()));
-            keys
+            (keys, bindings)
         }
-        Some(Err(e)) => {
+        Some((Err(e), _)) => {
             log.push(format!("{}: {e}; using the default key bindings", path.display()));
-            default_key_bindings(&defaults, &mut log, cx)
+            (default_key_bindings(&defaults, &mut log, cx), defaults)
         }
-        None => default_key_bindings(&defaults, &mut log, cx),
+        None => (default_key_bindings(&defaults, &mut log, cx), defaults),
     };
     cx.bind_keys(keys);
     state.update(cx, |s, _| {
+        s.bindings = in_effect;
         for line in log {
             s.log(line);
         }

@@ -41,6 +41,11 @@ impl SidebarState {
         }
     }
 
+    /// Audio files found under the sample folders by the last index.
+    pub fn sample_entries(&self) -> impl Iterator<Item = &BrowserEntry> {
+        self.sample_index.iter()
+    }
+
     /// Re-indexes the sample folders on the background executor.
     pub fn refresh_index(&mut self, folders: Vec<PathBuf>, cx: &mut Context<Shell>) {
         let walk = cx.background_executor().spawn(async move { index_samples(&folders) });

@@ -13,9 +13,10 @@ use crate::app_state::AppState;
 use crate::theme;
 use crate::ui::components::{TextField, TextFieldEvent};
 use crate::ui::instrument_tab::SliderDrag;
+use crate::ui::palette::PaletteState;
 use crate::ui::piano_roll::Rolls;
 use crate::ui::sidebar::SidebarState;
-use crate::ui::{bottom_panel, editor_area, sidebar, status_bar};
+use crate::ui::{bottom_panel, editor_area, modal, palette, sidebar, status_bar};
 
 /// Drag payloads for the two resize handles.
 pub struct SidebarResize;
@@ -46,6 +47,12 @@ pub struct Shell {
     pub slider: Option<SliderDrag>,
     /// State of each open piano roll tab (view, selection, drag).
     pub rolls: Rolls,
+    pub palette: Option<PaletteState>,
+    /// Focus for the front in-window prompt.
+    pub modal_focus: FocusHandle,
+    modal_shown: bool,
+    /// Width of the left pane when the editor is split, as a fraction.
+    pub split_ratio: f32,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -55,8 +62,9 @@ impl Shell {
             TextField::new("", "Search patterns, instruments, samples", |_| true, window, cx)
         });
         let subscriptions = vec![
-            cx.observe(&state, |shell, _, cx| {
+            cx.observe_in(&state, window, |shell, _, window, cx| {
                 shell.sync_rolls(cx);
+                shell.sync_modal_focus(window, cx);
                 cx.notify();
             }),
             cx.subscribe_in(&search_field, window, Self::on_search_event),
@@ -74,6 +82,10 @@ impl Shell {
             rename_subscription: None,
             slider: None,
             rolls: Rolls::new(),
+            palette: None,
+            modal_focus: cx.focus_handle(),
+            modal_shown: false,
+            split_ratio: 0.5,
             _subscriptions: subscriptions,
         };
         shell.sync_rolls(cx);
@@ -92,6 +104,20 @@ impl Shell {
             s.log(line);
             cx.notify();
         });
+    }
+
+    /// Moves focus into a prompt when one appears, and back out when the last one closes.
+    pub fn sync_modal_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let has_modal = !self.state.read(cx).modals.is_empty();
+        if has_modal && !self.modal_focus.is_focused(window) {
+            if self.palette.is_some() {
+                self.close_palette(window, cx);
+            }
+            window.focus(&self.modal_focus);
+        } else if !has_modal && self.modal_shown {
+            window.focus(&self.focus_handle);
+        }
+        self.modal_shown = has_modal;
     }
 
     /// Shows `view` in the sidebar (making the sidebar visible).
@@ -275,13 +301,25 @@ impl Shell {
         self.show_view(SidebarView::Search, window, cx);
     }
     fn new_project(&mut self, _: &project::New, _: &mut Window, cx: &mut Context<Self>) {
-        self.log(cx, "New Project… is not available yet");
+        self.state.update(cx, |s, cx| s.request_new(cx));
     }
     fn open_project(&mut self, _: &project::Open, _: &mut Window, cx: &mut Context<Self>) {
-        self.log(cx, "Open Project… is not available yet");
+        self.state.update(cx, |s, cx| s.request_open(cx));
     }
     fn save_project(&mut self, _: &project::Save, _: &mut Window, cx: &mut Context<Self>) {
-        self.log(cx, "Saving is not available yet");
+        self.state.update(cx, |s, cx| {
+            s.save(cx);
+        });
+    }
+    fn command_palette(&mut self, _: &workspace::CommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette(">", window, cx);
+    }
+    fn quick_open(&mut self, _: &workspace::QuickOpen, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette("", window, cx);
+    }
+    fn split_right(&mut self, _: &workspace::SplitRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.split_ratio = 0.5;
+        self.update_workspace(cx, WorkspaceState::split_right);
     }
     fn new_pattern(&mut self, _: &project::NewPattern, window: &mut Window, cx: &mut Context<Self>) {
         self.create_pattern(window, cx);
@@ -381,6 +419,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::show_project))
             .on_action(cx.listener(Self::show_sounds))
             .on_action(cx.listener(Self::show_search))
+            .on_action(cx.listener(Self::command_palette))
+            .on_action(cx.listener(Self::quick_open))
+            .on_action(cx.listener(Self::split_right))
             .on_action(cx.listener(Self::new_project))
             .on_action(cx.listener(Self::open_project))
             .on_action(cx.listener(Self::save_project))
@@ -394,6 +435,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::play_stop))
             .on_drag_move(cx.listener(Self::resize_sidebar))
             .on_drag_move(cx.listener(Self::resize_panel))
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -423,6 +465,8 @@ impl Render for Shell {
                     .child(main),
             )
             .child(status_bar::render(this, cx))
+            .children(palette::render(this, cx))
+            .children(modal::render(this, cx))
     }
 }
 

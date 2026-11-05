@@ -2,27 +2,33 @@
 //! dirty tracking, workspace layout, settings and the audio engine together.
 //! Views read it and call its methods; it notifies them on every change.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use basedrop::{Collector, Owned, Shared};
 use gpui::{Context, PathPromptOptions, Subscription, Task};
 use nw_core::{
-    DocPath, Edit, History, Instrument, InstrumentId, Pattern, PatternId, Project, Tick,
-    hash_bytes, load_project, new_instrument, next_pattern, remove_instrument_edit,
+    DocPath, Edit, History, Instrument, InstrumentId, Pattern, PatternId, Project,
+    ProjectWatcher, Tick, clear_recovery, external_changes, hash_bytes, load_project,
+    new_instrument, next_pattern, read_recovery, remove_instrument_edit, save_project,
+    write_recovery,
 };
 use nw_engine::core::{Command, Feedback};
 use nw_engine::handle::EngineHandle;
 use nw_engine::sample::{SampleCache, load_sample};
 use nw_engine::snapshot::compile_snapshot;
+
+use crate::ui::modal::{Modal, ModalAction, Next};
 use nw_workspace::{
-    AUDIO_EXTENSIONS, AppSettings, DirtyTracker, TabKind, WorkspaceState, is_audio,
+    AUDIO_EXTENSIONS, AppSettings, Binding, DirtyTracker, TabKind, WorkspaceState, is_audio,
     load_settings, load_workspace, save_settings, save_workspace, settings_dir,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const WORKSPACE_SAVE_DELAY: Duration = Duration::from_millis(500);
+const RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
 pub const MIN_TEMPO: f64 = 20.0;
 pub const MAX_TEMPO: f64 = 999.0;
 
@@ -60,6 +66,16 @@ pub struct AppState {
     /// Bumped on every preview request so only the latest one sounds.
     preview_generation: u64,
     workspace_save: Option<Task<()>>,
+    /// In-window prompts waiting to be answered; the front one is shown.
+    pub modals: VecDeque<Modal>,
+    /// The key bindings in effect, for showing shortcuts in the palette.
+    pub bindings: Vec<Binding>,
+    /// Watches the open project folder; batches of changed paths arrive on `watch_rx`.
+    watcher: Option<ProjectWatcher>,
+    watch_rx: Option<mpsc::Receiver<Vec<PathBuf>>>,
+    /// Set when writing the recovery file failed, so the log is not flooded every 30 s.
+    recovery_failed: bool,
+    _recovery: Task<()>,
     _poll: Task<()>,
     _quit: Subscription,
 }
@@ -101,6 +117,14 @@ impl AppState {
                 }
             }
         });
+        let recovery = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(RECOVERY_INTERVAL).await;
+                if this.update(cx, |state, _| state.write_recovery_if_dirty()).is_err() {
+                    break;
+                }
+            }
+        });
         let quit = cx.on_app_quit(|state, _cx| {
             state.save_workspace_now();
             async {}
@@ -126,6 +150,12 @@ impl AppState {
             reported_sample_errors: HashSet::new(),
             preview_generation: 0,
             workspace_save: None,
+            modals: VecDeque::new(),
+            bindings: Vec::new(),
+            watcher: None,
+            watch_rx: None,
+            recovery_failed: false,
+            _recovery: recovery,
             _poll: poll,
             _quit: quit,
         };
@@ -133,9 +163,10 @@ impl AppState {
             state.log(line);
         }
         if let Some(path) = state.settings.last_project.clone()
-            && let Err(e) = state.open_project(&path) {
-                state.log(format!("Could not reopen the last project: {e}"));
-            }
+            && let Err(e) = state.open_project(&path)
+        {
+            state.log(format!("Could not reopen the last project: {e}"));
+        }
         state.resync_engine();
         state
     }
@@ -147,10 +178,18 @@ impl AppState {
         self.log.push(line);
     }
 
-    /// Replaces the current project with the one in `dir`. On error nothing changes.
+    /// Replaces the current project with the one in `dir`, starts watching it, offers any
+    /// crash recovery and remembers it as the last project. On error nothing changes.
     pub fn open_project(&mut self, dir: &Path) -> Result<(), String> {
         let dir = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let (project, warnings) = load_project(&dir).map_err(|e| e.to_string())?;
+        // Leave the old project cleanly: its layout is saved and playback stops.
+        self.save_workspace_now();
+        if self.playing {
+            self.send(Command::Stop);
+            self.playing = false;
+            self.playhead = 0;
+        }
         self.last_saved = hash_project_files(&dir, &project);
         self.workspace = load_workspace(&dir, &project);
         self.project = project;
@@ -161,8 +200,294 @@ impl AppState {
         for w in warnings {
             self.log(format!("Warning: {w:?}"));
         }
+        self.start_watching(&dir);
+        if let Some(recovered) = read_recovery(&dir) {
+            self.modals.push_back(Modal::recovery(recovered));
+        }
+        if self.settings.last_project.as_deref() != Some(dir.as_path()) {
+            self.settings.last_project = Some(dir.clone());
+            self.save_settings();
+        }
         self.project_dir = Some(dir);
+        self.resync_engine();
         Ok(())
+    }
+
+    /// `open_project`, showing a failure as an in-window prompt.
+    fn open_or_prompt(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        if let Err(e) = self.open_project(dir) {
+            self.log(format!("Could not open project: {e}"));
+            self.modals.push_back(Modal::error("Could not open project", e));
+        }
+        cx.notify();
+    }
+
+    fn start_watching(&mut self, dir: &Path) {
+        let (tx, rx) = mpsc::channel();
+        match ProjectWatcher::new(dir, move |paths| {
+            let _ = tx.send(paths);
+        }) {
+            Ok(watcher) => {
+                self.watcher = Some(watcher);
+                self.watch_rx = Some(rx);
+            }
+            Err(e) => {
+                self.watcher = None;
+                self.watch_rx = None;
+                self.log(format!("Not watching the project for outside changes: {e}"));
+            }
+        }
+    }
+
+    /// Writes every project file. On failure shows a prompt and leaves the project dirty.
+    pub fn save(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(dir) = self.project_dir.clone() else { return false };
+        let ok = match save_project(&dir, &self.project) {
+            Ok(report) => {
+                self.last_saved = report.written;
+                record_gitignore(&dir, &mut self.last_saved);
+                self.dirty.clear();
+                if let Err(e) = clear_recovery(&dir) {
+                    self.log(format!("Could not remove the recovery file: {e}"));
+                }
+                self.recovery_failed = false;
+                self.log("Saved");
+                true
+            }
+            Err(e) => {
+                self.log(format!("Save failed: {e}"));
+                self.modals.push_back(Modal::error("Could not save the project", e.to_string()));
+                false
+            }
+        };
+        cx.notify();
+        ok
+    }
+
+    fn write_recovery_if_dirty(&mut self) {
+        let Some(dir) = &self.project_dir else { return };
+        if !self.dirty.is_dirty() {
+            return;
+        }
+        match write_recovery(dir, &self.project) {
+            Ok(()) => self.recovery_failed = false,
+            Err(e) if !self.recovery_failed => {
+                self.recovery_failed = true;
+                self.log(format!("Could not write the recovery file: {e}"));
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Marks every document of the project dirty, so the next save rewrites them all.
+    fn mark_all_dirty(&mut self) {
+        let docs = project_docs(&self.project);
+        self.dirty.mark(docs);
+    }
+
+    /// Runs `next` now, or first asks to save when there are unsaved changes.
+    fn guard_unsaved(&mut self, next: Next, cx: &mut Context<Self>) {
+        if self.project_dir.is_some() && self.dirty.is_dirty() {
+            self.modals.push_back(Modal::unsaved(next));
+            cx.notify();
+        } else {
+            self.run_next(next, cx);
+        }
+    }
+
+    fn run_next(&mut self, next: Next, cx: &mut Context<Self>) {
+        match next {
+            Next::Quit => self.finish_quit(cx),
+            Next::Open(dir) => self.open_or_prompt(&dir, cx),
+            Next::Create(dir) => self.create_project(&dir, cx),
+        }
+    }
+
+    /// `app.quit` and closing the window: asks first when there are unsaved changes.
+    pub fn request_quit(&mut self, cx: &mut Context<Self>) {
+        self.guard_unsaved(Next::Quit, cx);
+    }
+
+    fn finish_quit(&mut self, cx: &mut Context<Self>) {
+        if let Some(dir) = &self.project_dir {
+            // Quitting without saving discards the changes, recovery included.
+            if let Err(e) = clear_recovery(dir) {
+                eprintln!("nullwave: could not remove the recovery file: {e}");
+            }
+        }
+        self.save_workspace_now();
+        cx.quit();
+    }
+
+    /// Asks for a project folder and opens it.
+    pub fn request_open(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open Project".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let result = paths.await;
+            this.update(cx, |state, cx| match result {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(dir) = paths.into_iter().next() {
+                        state.guard_unsaved(Next::Open(dir), cx);
+                    }
+                }
+                Ok(Ok(None)) | Err(_) => {}
+                Ok(Err(e)) => {
+                    state.log(format!("Could not open the folder picker: {e}"));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks for a new folder name with the native save panel and creates a project there.
+    pub fn request_new(&mut self, cx: &mut Context<Self>) {
+        let start = self
+            .project_dir
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .or_else(dirs_home)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let path = cx.prompt_for_new_path(&start, Some("Untitled"));
+        cx.spawn(async move |this, cx| {
+            let result = path.await;
+            this.update(cx, |state, cx| match result {
+                Ok(Ok(Some(dir))) => state.guard_unsaved(Next::Create(dir), cx),
+                Ok(Ok(None)) | Err(_) => {}
+                Ok(Err(e)) => {
+                    state.log(format!("Could not open the save panel: {e}"));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Creates `dir` holding a project with one empty "pattern 1", saves and opens it.
+    fn create_project(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        let not_empty = std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_some());
+        if dir.is_file() || not_empty {
+            let message = format!("{} already exists and is not empty.", dir.display());
+            self.modals.push_back(Modal::error("Could not create project", message));
+            cx.notify();
+            return;
+        }
+        let mut project = Project::default();
+        let (id, name) = next_pattern(&project);
+        project.patterns.push(Pattern { id, name, notes: BTreeMap::new() });
+        if let Err(e) = save_project(dir, &project) {
+            self.modals.push_back(Modal::error("Could not create project", e.to_string()));
+            cx.notify();
+            return;
+        }
+        self.open_or_prompt(dir, cx);
+    }
+
+    /// Answers the front prompt: `Some(button)` presses it, `None` (Esc) just closes it.
+    pub fn resolve_modal(&mut self, button: Option<usize>, cx: &mut Context<Self>) {
+        let Some(modal) = self.modals.pop_front() else { return };
+        let action = button.and_then(|i| modal.buttons.get(i)).map(|b| b.action.clone());
+        match action {
+            None | Some(ModalAction::Dismiss) => {}
+            Some(ModalAction::SaveThen(next)) => {
+                if self.save(cx) {
+                    self.run_next(next, cx);
+                }
+            }
+            Some(ModalAction::DiscardThen(next)) => {
+                // Opening another project replaces this one; nothing is written.
+                self.dirty.clear();
+                self.run_next(next, cx);
+            }
+            Some(ModalAction::Restore(project)) => {
+                self.project = *project;
+                self.history.clear();
+                self.mark_all_dirty();
+                self.after_load_change(cx);
+                self.log("Restored unsaved changes from the last session");
+            }
+            Some(ModalAction::DiscardRecovery) => {
+                if let Some(dir) = &self.project_dir
+                    && let Err(e) = clear_recovery(dir)
+                {
+                    self.log(format!("Could not remove the recovery file: {e}"));
+                }
+            }
+            Some(ModalAction::ReloadFromDisk) => self.reload_from_disk(cx),
+            Some(ModalAction::KeepMine) => {
+                self.mark_all_dirty();
+                self.log("Kept your version; saving will overwrite the files on disk");
+            }
+        }
+        cx.notify();
+    }
+
+    /// Handles a batch of changed paths from the watcher.
+    fn on_outside_changes(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(dir) = self.project_dir.clone() else { return };
+        let changed = external_changes(&paths, &self.last_saved, |p| std::fs::read(p).ok());
+        if changed.is_empty() {
+            return;
+        }
+        if !self.dirty.is_dirty() {
+            self.reload_from_disk(cx);
+            return;
+        }
+        // One prompt at a time for the same question.
+        if self.modals.iter().any(|m| m.buttons.iter().any(|b| matches!(b.action, ModalAction::ReloadFromDisk))) {
+            return;
+        }
+        let files: Vec<String> = changed
+            .iter()
+            .map(|p| p.strip_prefix(&dir).unwrap_or(p).display().to_string())
+            .collect();
+        self.modals.push_back(Modal::outside_changes(&files));
+        cx.notify();
+    }
+
+    /// Replaces the in-memory project with the files on disk. A parse error keeps memory.
+    fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.project_dir.clone() else { return };
+        match load_project(&dir) {
+            Ok((project, _)) => {
+                self.last_saved = hash_project_files(&dir, &project);
+                self.project = project;
+                // Undo steps refer to the old content; they no longer apply.
+                self.history.clear();
+                self.dirty.clear();
+                self.after_load_change(cx);
+                self.log("Reloaded the project from disk");
+            }
+            Err(e) => {
+                self.log(format!("Could not reload the project: {e}"));
+                self.modals.push_back(Modal::error("Could not reload the project", e.to_string()));
+                cx.notify();
+            }
+        }
+    }
+
+    /// After the whole project was replaced: drop stale tabs and resync the engine.
+    fn after_load_change(&mut self, cx: &mut Context<Self>) {
+        let before = self.workspace.clone();
+        self.workspace.retain_valid(&self.project);
+        if self.workspace != before {
+            self.workspace_changed(cx);
+        }
+        if let Some(p) = &self.last_played_pattern
+            && self.project.pattern(p).is_none()
+        {
+            self.last_played_pattern = None;
+        }
+        self.resync_engine();
+        cx.notify();
     }
 
     /// Commits one undo step, marks its documents dirty and updates the engine.
@@ -330,6 +655,15 @@ impl AppState {
     }
 
     fn poll_engine(&mut self, cx: &mut Context<Self>) {
+        let mut batches = Vec::new();
+        if let Some(rx) = &self.watch_rx {
+            while let Ok(paths) = rx.try_recv() {
+                batches.extend(paths);
+            }
+        }
+        if !batches.is_empty() {
+            self.on_outside_changes(batches, cx);
+        }
         let mut changed = false;
         if let Some(engine) = &mut self.engine {
             for feedback in engine.poll() {
@@ -601,15 +935,36 @@ fn read_settings(path: &Path, log: &mut Vec<String>) -> AppSettings {
 
 /// Hashes of the project files as they are on disk now, for outside-change detection.
 fn hash_project_files(dir: &Path, project: &Project) -> HashMap<PathBuf, u64> {
-    let mut docs = vec![DocPath::Song];
-    docs.extend(project.instruments.iter().map(|i| DocPath::Instrument(i.id.clone())));
-    for p in &project.patterns {
-        docs.extend(p.notes.keys().map(|i| DocPath::Notes(p.id.clone(), i.clone())));
-    }
-    docs.into_iter()
+    let mut hashes = project_docs(project)
+        .into_iter()
         .filter_map(|doc| {
             let path = dir.join(doc.relative_path());
             std::fs::read(&path).ok().map(|bytes| (path, hash_bytes(&bytes)))
         })
-        .collect()
+        .collect();
+    record_gitignore(dir, &mut hashes);
+    hashes
+}
+
+/// The watcher tracks the project's `.gitignore` too; remember its content so writing it
+/// ourselves does not look like an outside change.
+fn record_gitignore(dir: &Path, hashes: &mut HashMap<PathBuf, u64>) {
+    let path = dir.join(".gitignore");
+    if let Ok(bytes) = std::fs::read(&path) {
+        hashes.insert(path, hash_bytes(&bytes));
+    }
+}
+
+/// Every document the project has on disk: the song, each instrument and each note file.
+fn project_docs(project: &Project) -> Vec<DocPath> {
+    let mut docs = vec![DocPath::Song];
+    docs.extend(project.instruments.iter().map(|i| DocPath::Instrument(i.id.clone())));
+    for p in &project.patterns {
+        docs.extend(p.notes.iter().filter(|(_, n)| !n.is_empty()).map(|(i, _)| DocPath::Notes(p.id.clone(), i.clone())));
+    }
+    docs
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
 }
