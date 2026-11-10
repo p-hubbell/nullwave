@@ -1,0 +1,17 @@
+[package]
+name = "nw-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+assert_no_alloc.workspace = true
+basedrop.workspace = true
+cpal.workspace = true
+nw-core = { path = "../nw-core" }
+rtrb.workspace = true
+symphonia = { workspace = true, features = ["wav", "aiff", "flac", "mp3", "ogg", "vorbis", "pcm"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+hound = "3"
+tempfile = "3"

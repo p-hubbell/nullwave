@@ -53,7 +53,11 @@ crates/nw-core/src/
 crates/nw-engine/src/
   lib.rs
   sample.rs                        # SampleBuffer, load_sample, SampleCache
-  voice.rs                         # Voice, envelope, pan_gains, playback_rate
+  voice.rs                         # Voice, VoiceParams, pan_gains, playback_rate
+  process.rs                       # sample processing (region, reverse, normalize, declick, loop crossfade), ProcessedCache
+  env.rs                           # DAHDSR envelope with curves
+  filter.rs                        # state-variable filter (LP/HP/BP/notch)
+  lfo.rs                           # LFO shapes, free and tempo-synced rates
   snapshot.rs                      # Snapshot, compile_snapshot
   core.rs                          # EngineCore: transport, scheduler, voice pool, process
   handle.rs                        # EngineHandle: queues, collector, cpal stream
@@ -755,6 +759,198 @@ GPUI 0.2.2 has sparse docs. Read `docs.rs/gpui/0.2.2`, the crate's `examples/` f
 
 ---
 
+### Task 17a: Sampler model and file format
+
+The spec's "Sampler" section (revised 2026-11-04) defines every parameter, range and default used in Tasks 17a–17e. Read it first. Defaults must sound exactly like the sampler from Tasks 6–8.
+
+**Files:**
+- Modify: `crates/nw-core/src/model.rs`, `crates/nw-core/src/io/files.rs`, `crates/nullwave/src/ui/instrument_tab.rs` (only enough to compile against the new fields)
+- Test: `crates/nw-core/tests/sampler_model_tests.rs`
+
+**Interfaces:**
+- Produces, in `nw-core::model` (all `Clone, Debug, PartialEq, Serialize, Deserialize`, every struct `#[serde(default)]`):
+  - `Sampler { sample_path, root_note, region: Region, looping: Loop, one_shot: bool, processing: Processing, tune: Tune, volume_env: Envelope, filter: Filter, cutoff_env: ModEnvelope, pitch_env: ModEnvelope, pan_env: ModEnvelope, volume_lfo: Lfo, pan_lfo: Lfo, cutoff_lfo: Lfo, pitch_lfo: Lfo, velocity: VelocityMap, voice: VoiceSettings }`
+  - `Region { start: f32, end: f32 }` (fractions, default `0.0, 1.0`)
+  - `Loop { mode: LoopMode, start: f32, end: f32, crossfade_ms: f32 }`, `enum LoopMode { Off, Forward, PingPong }`
+  - `Processing { reverse, normalize, invert_polarity, swap_stereo, declick: bool }` (declick defaults to `true`)
+  - `Tune { coarse: i8, fine_cents: f32 }`
+  - `Envelope { delay_ms, attack_ms, hold_ms, decay_ms, sustain, release_ms, attack_curve, decay_curve: f32 }`; volume default `0, 0, 0, 0, 1.0, 20.0, 0, 0`
+  - `Filter { kind: FilterKind, cutoff_hz: f32, resonance: f32 }`, `enum FilterKind { Off, LowPass, HighPass, BandPass, Notch }`
+  - `ModEnvelope { env: Envelope, amount: f32 }` (amount in octaves, semitones or pan units by target; default 0)
+  - `Lfo { shape: LfoShape, rate: LfoRate, amount: f32, delay_ms: f32 }`, `enum LfoShape { Sine, Triangle, Saw, Square, Random }`, `enum LfoRate { Hz(f32), Sync { numerator: u16, denominator: u16 } }`
+  - `VelocityMap { to_volume: f32, to_cutoff_octaves: f32 }` (default `1.0, 0.0`)
+  - `VoiceSettings { polyphony: u8, mono: bool, glide_ms: f32, cut: u8, cut_by: u8 }` (default `64, false, 0, 0, 0`)
+- Behavior:
+  - **Legacy files:** an instrument file with top-level `attack_ms` / `release_ms` (the old shape) loads with those values in `volume_env`. New files are written in the new shape only.
+  - **Validation on load:** every range in the spec, plus `region.start < region.end` and loop points inside the region. A violation is `LoadError::Invalid` naming the file, like the existing checks.
+
+- [ ] **Step 1: Write the failing tests:** `default_sampler_matches_old_behaviour` (sustain 1, release 20, filter off, all amounts 0), `old_instrument_file_loads_attack_release_into_volume_env`, `new_shape_round_trips`, `missing_fields_take_defaults`, `region_start_after_end_is_invalid_naming_file`, `loop_outside_region_is_invalid`, `out_of_range_values_are_invalid` (one case per range).
+- [ ] **Step 2: Run** `cargo test -p nw-core`. Expected: FAIL.
+- [ ] **Step 3: Implement.** Update the instrument tab's slider fields to the new paths so the app still builds.
+- [ ] **Step 4: Run** `cargo test --workspace` and `cargo build -p nullwave`. Expected: PASS, no warnings.
+- [ ] **Step 5: Commit** with the message `feat(core): FL-style sampler model and file format`.
+
+---
+
+### Task 17b: Playback core (spec phase A)
+
+**Files:**
+- Create: `crates/nw-engine/src/process.rs`
+- Modify: `crates/nw-engine/src/{voice.rs,snapshot.rs,core.rs,lib.rs}`
+- Test: `crates/nw-engine/tests/process_tests.rs`, `crates/nw-engine/tests/playback_tests.rs`, `crates/nw-engine/tests/sample_tests.rs` (processed cache)
+
+**Interfaces:**
+- Produces:
+  - `process_sample(source: &SampleBuffer, settings: &ProcessSettings) -> ProcessedSample`, which runs off the audio thread. `ProcessSettings` holds `Processing`, `Region` and `Loop`. `ProcessedSample { buffer: SampleBuffer, region: PlayRegion }`, where `PlayRegion { start, end, loop_mode, loop_start, loop_end }` is a `Copy` struct of frame indices into the processed buffer. Reverse, polarity, stereo swap, normalize (peak to 1.0 over the region), declick and the forward-loop crossfade are baked into `buffer`. Declick means a 2 ms fade-in only where the start is trimmed into the waveform, a fade-out at the region end when no loop is on, and a 2 ms seam crossfade on forward loops without one.
+  - `SampleCache::processed(path, &ProcessSettings) -> (Shared<SampleBuffer>, PlayRegion)` caches by path and settings. `compile_snapshot` brackets its lookups with `begin_pass` / `end_pass`, which drops unused entries, so memory follows the project; `invalidate(path)` drops a file's processed versions too.
+  - Voices keep playing a plain `Shared<SampleBuffer>`, and `VoiceStart` gains a `region: PlayRegion`, so raw sidebar previews still need no allocation (they use `PlayRegion::whole`). `tuned_rate(pitch, root, coarse, fine_cents, sample_rate, output_rate)` adds tuning. `InstrumentSnapshot` gains `region`, `one_shot`, `coarse` and `fine_cents`.
+  - `Edit`'s instrument variants hold `Box<Instrument>`, so every undo step isn't sized for a full sampler.
+- Behavior:
+  - Playback starts at `start` and stops at `end`.
+  - **Loop modes:** forward jumps from `loop_end` to `loop_start`; ping-pong reverses direction at each loop edge.
+  - **Held vs. one-shot:** held releases at the note's end. One-shot ignores the note length, except with a loop on, where the note's end always releases.
+  - **Tune:** `playback_rate` takes `coarse` and `fine_cents`.
+  - Everything in `Voice::render` stays allocation-free, and `process_does_not_allocate` from Task 7 must still pass.
+
+- [ ] **Step 1: Write the failing tests.** Use a ramp sample (frame *i* has value *i*/N) so the output shows the read position:
+  - `region_plays_only_between_start_and_end`
+  - `reverse_plays_backwards`
+  - `normalize_scales_peak_to_one`
+  - `invert_and_swap_stereo`
+  - `declick_fades_edges`
+  - `forward_loop_repeats_until_note_end`
+  - `ping_pong_reverses_at_edges`
+  - `crossfade_removes_loop_discontinuity` (largest sample-to-sample jump at the wrap stays below a threshold)
+  - `one_shot_ignores_note_length`
+  - `one_shot_with_loop_still_ends_at_note_end`
+  - `coarse_and_fine_tune_change_rate`
+  - `cache_reuses_and_drops_unused`
+- [ ] **Step 2: Run** `cargo test -p nw-engine`. Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** `cargo test -p nw-engine` (debug, so `assert_no_alloc` is active). Expected: PASS.
+- [ ] **Step 5: Commit** with the message `feat(engine): sampler region, loop, one-shot, processing, tuning`.
+
+---
+
+### Task 17c: Envelopes, filter and modulation (spec phase B)
+
+**Files:**
+- Create: `crates/nw-engine/src/{env.rs,filter.rs,lfo.rs}`
+- Modify: `crates/nw-engine/src/{voice.rs,snapshot.rs,core.rs}`
+- Test: `crates/nw-engine/tests/{env_tests.rs,filter_tests.rs,lfo_tests.rs,modulation_tests.rs}`
+
+**Interfaces:**
+- Produces:
+  - `EnvState` (DAHDSR, stepping per sample, with curves): `start(EnvParams)`, `release()`, `tick() -> f32`, `is_done()`. `EnvParams` holds the times in samples.
+  - `Svf`: a TPT state-variable filter. `set(kind, cutoff_hz, resonance, sample_rate)` and `process(l, r) -> (l, r)`.
+  - `LfoState`: `start(LfoParams, sample_rate, seed)`, `tick() -> f32` in −1..=1 and `step(n)` for control-rate updates. Random (sample-and-hold) uses a per-voice xorshift with no allocation. Tempo-synced rates are converted to Hz at note start from the snapshot tempo.
+- Behavior:
+  - **Volume:** the volume envelope replaces the linear attack/release.
+  - **Control rate:** cutoff, pitch and pan modulation (envelope + LFO + velocity → cutoff) are computed every 16 frames, and filter coefficients update then too. Volume is per sample.
+  - **Cutoff:** `base_hz × 2^(octaves)`, clamped to 20 Hz–min(20 kHz, 0.45 × output rate).
+  - **Volume LFO:** scales gain by `1 − amount × (1 − lfo)/2`, so the amount is the depth of a dip below full volume.
+  - **Velocity → volume:** `gain = volume × (1 − to_volume + to_volume × velocity/127)`.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `dahdsr_stage_lengths` (exact sample counts for each stage)
+  - `sustain_holds_until_release`
+  - `release_from_mid_attack_starts_at_current_level`
+  - `curve_zero_is_linear` and `curves_bend_monotonically`
+  - `lowpass_attenuates_above_cutoff` (measure the RMS of a sine above and below cutoff)
+  - `highpass_attenuates_below_cutoff`
+  - `bandpass_and_notch_shapes`
+  - `resonance_peaks_at_cutoff`
+  - `filter_off_is_bit_exact_passthrough`
+  - `lfo_shapes_and_rate` (zero crossings per second)
+  - `synced_lfo_follows_tempo`
+  - `random_lfo_holds_between_steps`
+  - `lfo_delay`
+  - `pitch_env_bends_rate`
+  - `pan_lfo_moves_balance`
+  - `velocity_to_cutoff_darkens_soft_notes`
+  - `defaults_render_identically_to_task_7` (compare against the Task 7 expected outputs)
+  - `process_does_not_allocate_with_all_modulation_on`
+- [ ] **Step 2: Run** the tests. Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** `cargo test -p nw-engine`. Expected: PASS. Then add an `#[ignore]` benchmark, `full_load_block_time`: 64 voices with the filter and all four LFOs on, rendering 512-frame blocks. Run it in release with `cargo test -p nw-engine --release -- --ignored full_load_block_time`. Expected: under 25 % of the block's real-time duration at 48 kHz.
+- [ ] **Step 5: Commit** with the message `feat(engine): sampler envelopes, filter, LFOs, velocity mapping`.
+
+---
+
+### Task 17d: Voice behaviour (spec phase C)
+
+**Files:**
+- Modify: `crates/nw-engine/src/{core.rs,voice.rs,snapshot.rs}`
+- Test: `crates/nw-engine/tests/voice_mgmt_tests.rs`
+
+**Interfaces:**
+- Produces: `Voice::fade_out(samples)`, a fast linear fade from the current level that ignores the release time. `Voice::glide_to(rate, glide_samples)` for legato. Voices remember their instrument index.
+- Behavior:
+  - **Fades:** every stolen, cut or over-limit voice fades over 5 ms (`FADE_MS`). A voice that has not rendered a frame yet (e.g. stolen in the same frame it started) is replaced outright, since there is nothing to fade. `EngineCore::sounding_notes()` lists `(instrument, pitch)` of voices that are not fading, for tests.
+  - **Fade reserve:** the pool gains 16 reserve slots (`FADE_RESERVE`). When all `MAX_VOICES` are busy, the oldest voice is swapped (`voices.swap`, no allocation) into a free reserve slot to fade, and its slot takes the new note. With no free reserve slot it is cut hard, which is the old behaviour.
+  - **Polyphony:** starting a note over the instrument's limit fades that instrument's oldest voice.
+  - **Mono:** at most one non-fading voice per instrument. With `glide_ms > 0` and a voice sounding, the new note glides that voice's pitch (exponential in pitch, over `glide_ms`), keeps its envelope, and takes the new note's length. With `glide_ms == 0` the old voice fades and a new one starts.
+  - **Cut groups:** a note on an instrument with `cut = G` (G > 0) fades every voice of instruments whose `cut_by == G`, including voices of the same instrument.
+  - **Previews:** `PreviewNote` follows the same rules, so a preview chokes like a real note.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `steal_fades_instead_of_cutting` (no sample-to-sample jump above a threshold)
+  - `full_pool_and_full_reserve_still_never_panics`
+  - `polyphony_limit_fades_oldest_of_that_instrument_only`
+  - `mono_without_glide_retriggers`
+  - `mono_glide_bends_pitch_and_keeps_envelope`
+  - `open_hat_cut_by_closed_hat`
+  - `cut_group_does_not_touch_other_groups`
+  - `stop_still_releases_everything` (Review Focus 3)
+  - `process_does_not_allocate_under_cuts_and_steals`
+- [ ] **Step 2: Run** the tests. Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** `cargo test -p nw-engine`. Expected: PASS.
+- [ ] **Step 5: Commit** with the message `feat(engine): polyphony limit, mono glide, cut groups, fade on steal`.
+
+---
+
+### Task 17e: Instrument tab (spec phase D)
+
+**Files:**
+- Create: `crates/nullwave/src/ui/{param.rs,waveform.rs,envelope_graph.rs}`
+- Modify: `crates/nullwave/src/ui/instrument_tab.rs`, `crates/nullwave/src/app_state.rs`, `crates/nw-engine/src/sample.rs`
+- Test: unit tests in `param.rs` and `waveform.rs`; `crates/nw-engine/tests/sample_tests.rs` for peaks
+
+**Interfaces:**
+- Consumes: the model from Task 17a and `AppState::preview_note`.
+- Produces:
+  - `nw_engine::sample::peaks(&SampleBuffer, buckets) -> Vec<(f32, f32)>` (min/max per bucket). The app computes peaks on the background executor and caches them per sample path.
+  - `ParamSpec { label, get: fn(&Instrument) -> f32, set: fn(&mut Instrument, f32), min, max, scale: Linear | Log | Squared, format: fn(f32) -> String }`. One table describes every slider, and the Task 15 `Field` enum and slider code become generic over `ParamSpec`. A drag still shows its value live and commits one `UpdateInstrument` on release.
+- Behavior:
+  - **Sections:** Sample, Pitch, Envelopes, Filter, LFO, Velocity, Voice, each with a small uppercase header. Volume and pan stay at the top. The tab scrolls.
+  - **Sample section:** the waveform, with start/end markers (dim outside the region) and loop markers when the loop is on. Each marker drags and commits on release.
+    - Toggles: reverse, normalize, invert polarity, swap stereo, declick, one-shot.
+    - Loop mode as a three-way segmented control, plus a crossfade slider.
+    - The waveform shows the processed result, so reversing flips it.
+  - **Envelopes section:** a segmented control picks volume / cutoff / pitch / pan. The graph shows the DAHDSR shape with draggable points (attack peak, decay/sustain, release end), and sliders sit beside it. Modulation envelopes also have an amount slider.
+  - **LFO section:** a segmented control picks volume / pan / cutoff / pitch. Shape is a segmented control, rate has a "sync" toggle (free Hz or a note value), then amount and delay.
+  - **Voice section:** polyphony stepper, mono toggle, glide slider (dimmed unless mono), and cut / cut-by steppers (0 shown as "none").
+  - **Audition:** a ▶ button next to the tab title plays the root note through `preview_note`.
+  - **Missing sample:** the waveform area shows the "missing sample" state from Task 15.
+
+- [ ] **Step 1: Write the failing tests:** `peaks_min_max_per_bucket`, `peaks_of_empty_buffer`, `param_specs_round_trip_through_fraction` (for every spec, `value_at(fraction_of(v)) ≈ v` across its range), `param_specs_stay_in_range`, `marker_drag_keeps_start_before_end`.
+- [ ] **Step 2: Run** the tests. Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Build** with `cargo build -p nullwave` (no warnings), then run and check manually. Expected:
+  - Every section is present.
+  - Trimming the start in the waveform audibly skips the attack.
+  - A looped pad sustains under a long note, and ping-pong is audible.
+  - The filter envelope gives a pluck.
+  - A tempo-synced LFO on cutoff wobbles in time.
+  - Closed hat chokes open hat.
+  - Mono glide slides between overlapping notes.
+  - Every change is one ⌘Z step.
+  - An old project from before Task 17a opens and sounds the same.
+- [ ] **Step 5: Commit** with the message `feat(app): full sampler instrument tab`.
+
+---
+
 ### Task 18: First-evening acceptance pass
 
 **Files:**
@@ -769,6 +965,7 @@ GPUI 0.2.2 has sparse docs. Read `docs.rs/gpui/0.2.2`, the crate's `examples/` f
   - Make 4 patterns with notes on 2–3 instruments each.
   - Play and loop each pattern, and change the tempo while playing.
   - Adjust volume, pan and release.
+  - Shape a sound in the sampler: trim a sample, loop a pad, give a bass a filter-envelope pluck, and choke an open hat with a closed one.
   - Save, quit and relaunch: the project, the tabs and the panel sizes come back exactly as they were.
   - At no point does a floating window appear.
 - [ ] **Step 3: Check the anti-goals:** count every window the OS shows during the walkthrough. Expected: one, plus the native file pickers only.

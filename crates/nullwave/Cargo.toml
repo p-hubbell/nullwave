@@ -1,0 +1,15 @@
+[package]
+name = "nullwave"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# `runtime_shaders` compiles the Metal shaders when the app starts instead of at build
+# time, so building does not need Xcode's separately downloaded Metal Toolchain.
+gpui = { workspace = true, features = ["runtime_shaders"] }
+assert_no_alloc.workspace = true
+basedrop.workspace = true
+ron.workspace = true
+nw-core = { path = "../nw-core" }
+nw-engine = { path = "../nw-engine" }
+nw-workspace = { path = "../nw-workspace" }
