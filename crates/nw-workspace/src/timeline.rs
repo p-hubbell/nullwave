@@ -2,7 +2,8 @@
 //! a point lands on. Pure; the app paints and handles the mouse.
 
 use nw_core::{
-    AudioLaneId, AudioPlacement, Container, InstrumentId, PatternPlacement, Placement, Project, Tick, Timeline,
+    AudioLaneId, AudioPlacement, ClipRef, Container, InstrumentId, PPQ, PatternPlacement, Placement, PlayTarget,
+    Project, Tick, TimeSignature, Timeline,
 };
 
 /// Edge grab zone of a block, in pixels (never more than a third of the block).
@@ -229,4 +230,76 @@ pub fn hit_test(view: &TimelineView, lanes: &[Lane], blocks: &[Block], outlines:
 /// `tick` relative to a placed pattern starting at `outline_at`; `None` before its start.
 pub fn to_pattern_local(outline_at: Tick, tick: Tick) -> Option<Tick> {
     tick.checked_sub(outline_at)
+}
+
+/// Where `clip`'s piano roll shows the playhead (clip-local ticks) while `playing` is at
+/// `playhead`: inside whichever of its blocks is sounding, `None` if none is.
+pub fn clip_playhead(p: &Project, playing: &PlayTarget, clip: &ClipRef, playhead: Tick) -> Option<Tick> {
+    let in_timeline = |t: &Timeline, tick: Tick| {
+        let c = t.clip(&clip.key)?;
+        t.placements
+            .iter()
+            .filter(|pl| pl.clip == clip.key)
+            .find(|pl| (pl.at..pl.at + c.length).contains(&tick))
+            .map(|pl| tick - pl.at + c.start)
+    };
+    match (playing, &clip.container) {
+        (PlayTarget::Pattern(a), Container::Pattern(b)) if a == b => in_timeline(&p.pattern(b)?.timeline, playhead),
+        (PlayTarget::Song, Container::Song) => in_timeline(&p.song.timeline, playhead),
+        (PlayTarget::Song, Container::Pattern(id)) => {
+            let t = &p.pattern(id)?.timeline;
+            p.song
+                .patterns
+                .iter()
+                .filter(|pp| &pp.pattern == id && pp.at <= playhead)
+                .find_map(|pp| in_timeline(t, playhead - pp.at))
+        }
+        _ => None,
+    }
+}
+
+/// The timeline's snap menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SnapSize {
+    #[default]
+    Bar,
+    Beat,
+    Sixteenth,
+    Off,
+}
+
+impl SnapSize {
+    pub fn ticks(self, ts: TimeSignature) -> Tick {
+        match self {
+            SnapSize::Bar => ts.ticks_per_bar().max(1),
+            SnapSize::Beat => (PPQ * 4 / u32::from(ts.denominator.max(1))).max(1),
+            SnapSize::Sixteenth => PPQ / 4,
+            SnapSize::Off => 1,
+        }
+    }
+
+    /// The next size in the menu (wrapping).
+    pub fn next(self) -> SnapSize {
+        match self {
+            SnapSize::Bar => SnapSize::Beat,
+            SnapSize::Beat => SnapSize::Sixteenth,
+            SnapSize::Sixteenth => SnapSize::Off,
+            SnapSize::Off => SnapSize::Bar,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SnapSize::Bar => "Bar",
+            SnapSize::Beat => "Beat",
+            SnapSize::Sixteenth => "1/16",
+            SnapSize::Off => "Off",
+        }
+    }
+}
+
+/// A drag distance in ticks rounded to the nearest multiple of `snap`.
+pub fn snap_delta(ticks: f32, snap: Tick) -> i64 {
+    let snap = snap.max(1) as f32;
+    (ticks / snap).round() as i64 * snap as i64
 }

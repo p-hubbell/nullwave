@@ -8,7 +8,7 @@ use crate::actions::project;
 use crate::app_state::AppState;
 use crate::theme;
 use crate::ui::components::button;
-use crate::ui::{instrument_tab, pattern_tab, piano_roll};
+use crate::ui::{instrument_tab, timeline};
 use crate::ui::shell::{DragGhost, Shell};
 
 /// Drag payload for the divider between split panes.
@@ -86,9 +86,10 @@ fn render_pane(shell: &Shell, state: &AppState, pane: usize, cx: &Context<Shell>
         render_tab(shell, state, pane, i, tab, active, focused && active)
     });
     let body = match p.active.and_then(|a| p.tabs.get(a)) {
-        Some(TabKind::Pattern(id)) => pattern_tab::render(shell, state, id),
+        Some(tab @ (TabKind::Pattern(_) | TabKind::Song)) => timeline::render(shell, state, tab, cx),
         Some(TabKind::Instrument(id)) => instrument_tab::render(shell, state, id, cx),
-        Some(TabKind::PianoRoll(p, i)) => piano_roll::render(shell, state, &(p.clone(), i.clone()), cx),
+        // Upgraded to pattern tabs when the workspace loads; never shown.
+        Some(TabKind::PianoRoll(..)) => empty_pane().into_any_element(),
         None => empty_pane().into_any_element(),
     };
     let focus_state = shell.state.clone();
@@ -189,5 +190,5 @@ fn empty_pane() -> impl IntoElement {
         .items_center()
         .justify_center()
         .text_color(theme::text_faint())
-        .child("Open a pattern from the sidebar")
+        .child("Open the song or a pattern from the sidebar")
 }

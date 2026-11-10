@@ -23,7 +23,7 @@ use crate::theme;
 use crate::ui::components::{Tooltip, button, section_header};
 use crate::ui::envelope_graph::{self, EnvPoint};
 use crate::ui::param::{self, ParamSpec};
-use crate::ui::pattern_tab::SampleDrag;
+use crate::ui::drag::SampleDrag;
 use crate::ui::shell::Shell;
 use crate::ui::waveform::{self, Marker, keep_loop_in_region, moved_marker};
 

@@ -241,7 +241,7 @@ fn workspace_round_trip() {
     ws.split_right();
     ws.set_timeline(TimelineTabState {
         tab: tp("p1"),
-        open_clip: Some(ClipKey { instrument: ins("drums"), number: 2 }),
+        open_clip: Some(ClipRef { container: Container::Pattern(pat("p1")), key: ClipKey { instrument: ins("drums"), number: 2 } }),
         roll_height: 300.0,
         px_per_beat: 40.0,
         scroll_ticks: 960.0,

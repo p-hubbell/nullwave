@@ -143,3 +143,36 @@ fn pattern_local_ticks_clamp_at_outline_start() {
     assert_eq!(to_pattern_local(7680, 7680), Some(0));
     assert_eq!(to_pattern_local(7680, 7000), None);
 }
+
+#[test]
+fn clip_playhead_maps_into_the_playing_block() {
+    let mut p = project();
+    p.patterns[0].timeline.clips[1].start = 480; // kick 2's window starts 480 ticks in
+    let kick = ClipRef { container: Container::Pattern(pid("p1")), key: key("kick", 2) };
+    let pat = PlayTarget::Pattern(pid("p1"));
+    assert_eq!(clip_playhead(&p, &pat, &kick, 2000), Some(80 + 480));
+    assert_eq!(clip_playhead(&p, &pat, &kick, 100), None, "not inside a kick block");
+    // In the song, through either placement of the pattern.
+    assert_eq!(clip_playhead(&p, &PlayTarget::Song, &kick, 7680 + 2000), Some(560));
+    // A loose song clip.
+    let loose = ClipRef { container: Container::Song, key: key("bell", 1) };
+    assert_eq!(clip_playhead(&p, &PlayTarget::Song, &loose, 1000), Some(40));
+    assert_eq!(clip_playhead(&p, &pat, &loose, 1000), None, "the song is not playing");
+    // Another pattern playing.
+    assert_eq!(clip_playhead(&p, &PlayTarget::Pattern(pid("p2")), &kick, 2000), None);
+}
+
+#[test]
+fn snap_sizes() {
+    let ts = TimeSignature::default();
+    assert_eq!(SnapSize::Bar.ticks(ts), 3840);
+    assert_eq!(SnapSize::Beat.ticks(ts), 960);
+    assert_eq!(SnapSize::Sixteenth.ticks(ts), 240);
+    assert_eq!(SnapSize::Off.ticks(ts), 1);
+    assert_eq!(SnapSize::Bar.next(), SnapSize::Beat);
+    assert_eq!(SnapSize::Off.next(), SnapSize::Bar);
+    assert_eq!(snap_delta(1900.0, 3840), 0);
+    assert_eq!(snap_delta(1921.0, 3840), 3840);
+    assert_eq!(snap_delta(-2000.0, 3840), -3840);
+    assert_eq!(snap_delta(7.4, 1), 7);
+}

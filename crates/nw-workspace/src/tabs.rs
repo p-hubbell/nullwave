@@ -1,11 +1,11 @@
 //! Pure-Rust workspace state: tabs, panes, sidebar/panel layout and persistence.
 
-use nw_core::{ClipKey, ClipRef, Container, InstrumentId, PatternId, PlayTarget, Project};
+use nw_core::{ClipRef, Container, InstrumentId, PatternId, PlayTarget, Project};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::Path;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TabKind {
     Pattern(PatternId),
     Song,
@@ -20,7 +20,7 @@ pub enum TabKind {
 pub struct TimelineTabState {
     pub tab: TabKind,
     /// The clip shown in the piano roll under the timeline, if any.
-    pub open_clip: Option<ClipKey>,
+    pub open_clip: Option<ClipRef>,
     pub roll_height: f32,
     pub px_per_beat: f32,
     pub scroll_ticks: f32,
