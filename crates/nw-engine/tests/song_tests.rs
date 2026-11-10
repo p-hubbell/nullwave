@@ -207,3 +207,24 @@ fn song_processing_does_not_allocate() {
         core.process(&mut buf);
     });
 }
+
+#[test]
+fn song_end_keeps_a_sample_preview_sounding() {
+    let c = Collector::new();
+    let mut core = core_with(&c, 3840, false, vec![]);
+    core.handle(Command::Play);
+    let b = SampleBuffer { sample_rate: RATE, left: vec![0.5; 400_000], right: vec![0.5; 400_000] };
+    core.handle(Command::Preview(basedrop::Shared::new(&c.handle(), b)));
+    let out = render(&mut core, 3840 * SPT + 5000);
+    assert!(!core.is_playing(), "the song stopped");
+    assert!(out[3840 * SPT + 4000] != 0.0, "the preview keeps going");
+}
+
+#[test]
+fn missing_audio_counts_one_bar_toward_the_song_length() {
+    let c = Collector::new();
+    let mut cache = SampleCache::new(c.handle());
+    let p = song_with_audio("/nonexistent/tag.wav".into(), 4000);
+    let s = compile_snapshot(&p, Some(&PlayTarget::Song), &mut cache);
+    assert_eq!(s.length, 11520, "drawn one bar long (4000..7840), so the song runs to bar 4");
+}

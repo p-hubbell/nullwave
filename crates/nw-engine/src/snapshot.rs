@@ -128,9 +128,10 @@ fn audio_sampler(path: &std::path::Path) -> Sampler {
 
 const AUDIO_PITCH: u8 = 60;
 
-/// Length of `inst`'s region in ticks at `tempo` (at least 1).
-fn region_ticks(inst: &InstrumentSnapshot, tempo: f64) -> Tick {
-    let Some(sample) = &inst.sample else { return 1 };
+/// Length of `inst`'s region in ticks at `tempo` (at least 1). A missing file counts as
+/// `missing` ticks, matching how long the timeline draws it.
+fn region_ticks(inst: &InstrumentSnapshot, tempo: f64, missing: Tick) -> Tick {
+    let Some(sample) = &inst.sample else { return missing.max(1) };
     let frames = inst.region.end.saturating_sub(inst.region.start) as f64;
     let seconds = frames / f64::from(sample.sample_rate.max(1));
     ((seconds * tempo / 60.0 * f64::from(PPQ)).ceil() as Tick).max(1)
@@ -153,6 +154,7 @@ pub fn compile_snapshot(project: &Project, target: Option<&PlayTarget>, samples:
         instruments.push(inst);
     }
     let tempo = if project.tempo > 0.0 { project.tempo } else { 120.0 };
+    let bar = project.time_signature.ticks_per_bar();
 
     let to_event = |n: FlatNote| {
         project.instrument_index(&n.instrument).map(|instrument| NoteEvent {
@@ -175,11 +177,11 @@ pub fn compile_snapshot(project: &Project, target: Option<&PlayTarget>, samples:
             for a in &project.song.audio {
                 let Some(i) = lane_index(&a.lane) else { continue };
                 let instrument = first_audio + i;
-                let length = region_ticks(&instruments[instrument], tempo);
+                let length = region_ticks(&instruments[instrument], tempo, bar);
                 events.push(NoteEvent { tick: a.at, instrument, pitch: AUDIO_PITCH, velocity: 127, length });
             }
             let audio_ticks =
-                |id: &nw_core::AudioLaneId| lane_index(id).map_or(0, |i| region_ticks(&instruments[first_audio + i], tempo));
+                |id: &nw_core::AudioLaneId| lane_index(id).map_or(0, |i| region_ticks(&instruments[first_audio + i], tempo, bar));
             (song_length(project, &audio_ticks), false)
         }
         None => (project.time_signature.ticks_per_bar().max(1), true),

@@ -278,12 +278,14 @@ impl EngineCore {
         }
     }
 
-    /// Play-once reached its end: release everything and stop there.
+    /// Play-once reached its end: release the song's notes and stop there.
     fn finish(&mut self, length: Tick) {
-        for v in &mut self.voices {
-            v.release();
+        // A sample preview from the sidebar is not part of the song; let it ring.
+        for (i, v) in self.voices.iter_mut().enumerate() {
+            if self.preview.is_none_or(|(p, _)| p != i) {
+                v.release();
+            }
         }
-        self.preview = None;
         self.playing = false;
         self.position = f64::from(length);
     }
