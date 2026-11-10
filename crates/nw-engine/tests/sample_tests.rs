@@ -160,3 +160,25 @@ fn processed_cache_reuses_and_drops_unused() {
     let missing = dir.path().join("nope.wav");
     assert!(matches!(cache.processed(&missing, &plain), Err(SampleError::NotFound(_))));
 }
+
+#[test]
+fn peaks_min_max_per_bucket() {
+    use nw_engine::sample::{SampleBuffer, peaks};
+    let left = vec![0.1, -0.5, 0.3, 0.9, -0.2, 0.0, 0.4, -0.8];
+    let right = vec![0.0, 0.2, -0.6, 0.1, 0.5, 0.0, -0.1, 0.3];
+    let buf = SampleBuffer { sample_rate: 44100, left, right };
+    // Min and max over both channels, per quarter of the buffer.
+    assert_eq!(peaks(&buf, 4), vec![(-0.5, 0.2), (-0.6, 0.9), (-0.2, 0.5), (-0.8, 0.4)]);
+    // More buckets than frames: each frame gets one, the rest repeat the nearest frame.
+    let p = peaks(&buf, 16);
+    assert_eq!(p.len(), 16);
+    assert_eq!(p[0], (0.0, 0.1));
+}
+
+#[test]
+fn peaks_of_empty_buffer() {
+    use nw_engine::sample::{SampleBuffer, peaks};
+    let buf = SampleBuffer { sample_rate: 44100, left: vec![], right: vec![] };
+    assert_eq!(peaks(&buf, 8), vec![(0.0, 0.0); 8]);
+    assert!(peaks(&buf, 0).is_empty());
+}

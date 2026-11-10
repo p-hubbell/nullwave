@@ -3,11 +3,14 @@
 pub mod bottom_panel;
 pub mod components;
 pub mod editor_area;
+pub mod envelope_graph;
 pub mod instrument_tab;
 pub mod modal;
 pub mod palette;
+pub mod param;
 pub mod pattern_tab;
 pub mod piano_roll;
 pub mod shell;
 pub mod sidebar;
 pub mod status_bar;
+pub mod waveform;

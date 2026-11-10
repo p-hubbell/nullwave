@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use basedrop::{Collector, Owned, Shared};
@@ -17,7 +17,7 @@ use nw_core::{
 };
 use nw_engine::core::{Command, Feedback};
 use nw_engine::handle::EngineHandle;
-use nw_engine::sample::{SampleCache, load_sample};
+use nw_engine::sample::{SampleBuffer, SampleCache, load_sample, peaks};
 use nw_engine::snapshot::compile_snapshot;
 
 use crate::ui::modal::{Modal, ModalAction, Next};
@@ -29,6 +29,19 @@ use nw_workspace::{
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const WORKSPACE_SAVE_DELAY: Duration = Duration::from_millis(500);
 const RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
+/// Waveform resolution: min/max pairs per sample, whatever the view width.
+const PEAK_BUCKETS: usize = 2048;
+
+/// Peaks of an instrument's processed sample, for the waveform view.
+pub struct Waveform {
+    pub peaks: Arc<Vec<(f32, f32)>>,
+    /// Address of the processed buffer they were computed from.
+    source: usize,
+}
+
+fn buffer_id(buffer: &Shared<SampleBuffer>) -> usize {
+    &**buffer as *const SampleBuffer as usize
+}
 pub const MIN_TEMPO: f64 = 20.0;
 pub const MAX_TEMPO: f64 = 999.0;
 
@@ -68,6 +81,13 @@ pub struct AppState {
     workspace_save: Option<Task<()>>,
     /// In-window prompts waiting to be answered; the front one is shown.
     pub modals: VecDeque<Modal>,
+    /// Waveform peaks per instrument, computed in the background after each compile.
+    pub waveforms: HashMap<InstrumentId, Waveform>,
+    /// Each instrument's processed sample from the last compile.
+    processed: HashMap<InstrumentId, Shared<SampleBuffer>>,
+    /// Buffers whose peaks are being computed.
+    peak_jobs: HashSet<usize>,
+    peaks_stale: bool,
     /// The key bindings in effect, for showing shortcuts in the palette.
     pub bindings: Vec<Binding>,
     /// Watches the open project folder; batches of changed paths arrive on `watch_rx`.
@@ -151,6 +171,10 @@ impl AppState {
             preview_generation: 0,
             workspace_save: None,
             modals: VecDeque::new(),
+            waveforms: HashMap::new(),
+            processed: HashMap::new(),
+            peak_jobs: HashSet::new(),
+            peaks_stale: false,
             bindings: Vec::new(),
             watcher: None,
             watch_rx: None,
@@ -582,6 +606,14 @@ impl AppState {
     pub fn resync_engine(&mut self) {
         let pattern = self.snapshot_pattern();
         let snapshot = compile_snapshot(&self.project, pattern.as_ref(), &mut self.samples);
+        self.processed = self
+            .project
+            .instruments
+            .iter()
+            .zip(&snapshot.instruments)
+            .filter_map(|(inst, snap)| snap.sample.clone().map(|b| (inst.id.clone(), b)))
+            .collect();
+        self.peaks_stale = true;
         self.report_sample_errors();
         if let Some(engine) = &self.engine {
             let owned = Owned::new(&engine.collector_handle(), snapshot);
@@ -654,7 +686,42 @@ impl AppState {
         }
     }
 
+    /// Starts background peak computations for processed samples that changed.
+    fn refresh_waveforms(&mut self, cx: &mut Context<Self>) {
+        self.peaks_stale = false;
+        let processed = &self.processed;
+        self.waveforms.retain(|id, _| processed.contains_key(id));
+        let mut started = Vec::new();
+        for (id, buffer) in &self.processed {
+            let source = buffer_id(buffer);
+            let current = self.waveforms.get(id).is_some_and(|w| w.source == source);
+            if current || self.peak_jobs.contains(&source) {
+                continue;
+            }
+            started.push(source);
+            let (id, buffer) = (id.clone(), buffer.clone());
+            let job = cx.background_executor().spawn(async move { peaks(&buffer, PEAK_BUCKETS) });
+            cx.spawn(async move |this, cx| {
+                let peaks = Arc::new(job.await);
+                this.update(cx, |state, cx| {
+                    state.peak_jobs.remove(&source);
+                    // Only keep them if the instrument still plays that buffer.
+                    if state.processed.get(&id).is_some_and(|b| buffer_id(b) == source) {
+                        state.waveforms.insert(id, Waveform { peaks, source });
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        self.peak_jobs.extend(started);
+    }
+
     fn poll_engine(&mut self, cx: &mut Context<Self>) {
+        if self.peaks_stale {
+            self.refresh_waveforms(cx);
+        }
         let mut batches = Vec::new();
         if let Some(rx) = &self.watch_rx {
             while let Ok(paths) = rx.try_recv() {

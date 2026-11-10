@@ -12,7 +12,7 @@ use crate::actions::{edit, instrument, pattern, project, transport, workspace};
 use crate::app_state::AppState;
 use crate::theme;
 use crate::ui::components::{TextField, TextFieldEvent};
-use crate::ui::instrument_tab::SliderDrag;
+use crate::ui::instrument_tab::{InstDrag, InstView};
 use crate::ui::palette::PaletteState;
 use crate::ui::piano_roll::Rolls;
 use crate::ui::sidebar::SidebarState;
@@ -43,8 +43,10 @@ pub struct Shell {
     /// The pattern being renamed inline in the sidebar, and its field.
     pub pattern_rename: Option<(PatternId, Entity<TextField>)>,
     rename_subscription: Option<Subscription>,
-    /// An instrument-tab slider drag in progress.
-    pub slider: Option<SliderDrag>,
+    /// A drag on an instrument tab (slider, waveform marker, envelope point).
+    pub inst_drag: Option<InstDrag>,
+    /// Which envelope and LFO each instrument tab shows.
+    pub inst_views: std::collections::HashMap<nw_core::InstrumentId, InstView>,
     /// State of each open piano roll tab (view, selection, drag).
     pub rolls: Rolls,
     pub palette: Option<PaletteState>,
@@ -80,7 +82,8 @@ impl Shell {
             tempo_subscription: None,
             pattern_rename: None,
             rename_subscription: None,
-            slider: None,
+            inst_drag: None,
+            inst_views: std::collections::HashMap::new(),
             rolls: Rolls::new(),
             palette: None,
             modal_focus: cx.focus_handle(),

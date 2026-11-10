@@ -192,3 +192,22 @@ impl SampleCache {
         self.processed.retain(|(p, _), _| p != path);
     }
 }
+
+/// Min and max (over both channels) of `buckets` equal slices of `buffer`, for drawing a
+/// waveform. Slices narrower than a frame use the nearest frame. Not for the audio thread.
+pub fn peaks(buffer: &SampleBuffer, buckets: usize) -> Vec<(f32, f32)> {
+    let len = buffer.left.len().min(buffer.right.len());
+    if len == 0 {
+        return vec![(0.0, 0.0); buckets];
+    }
+    (0..buckets)
+        .map(|b| {
+            let start = (b * len / buckets).min(len - 1);
+            let end = ((b + 1) * len / buckets).clamp(start + 1, len);
+            buffer.left[start..end]
+                .iter()
+                .chain(&buffer.right[start..end])
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)))
+        })
+        .collect()
+}
