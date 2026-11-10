@@ -1,0 +1,10 @@
+(
+    notes: [
+        (
+            pitch: 60,
+            start: 0,
+            length: 3840,
+            velocity: 100,
+        ),
+    ],
+)
