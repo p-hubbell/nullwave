@@ -81,6 +81,11 @@ pub fn same_canvas(started: Option<Point<f32>>, here: Point<f32>) -> bool {
     started.is_some_and(|s| (s.x - here.x).abs() < 0.5 && (s.y - here.y).abs() < 0.5)
 }
 
+/// Where something dropped at `x` lands: snapped down to the tab's snap size.
+pub fn drop_tick(view: &TimelineView, x: f32, snap: SnapSize, ts: TimeSignature) -> Tick {
+    snap_floor(view.tick_at(x).max(0.0), snap.ticks(ts))
+}
+
 fn origin(bounds: Bounds<Pixels>) -> Point<f32> {
     point(f32::from(bounds.origin.x), f32::from(bounds.origin.y))
 }
@@ -837,6 +842,7 @@ pub fn render(shell: &Shell, state: &AppState, tab: &TabKind, cx: &Context<Shell
     let is_song = container == Container::Song;
     let (sample_bounds, pattern_bounds) = (drop_bounds.clone(), drop_bounds);
     let (sample_state, pattern_state) = (shell.state.clone(), shell.state.clone());
+    let drop_snap = ui.snap;
     let lane_area = div()
         .relative()
         .flex_1()
@@ -854,8 +860,7 @@ pub fn render(shell: &Shell, state: &AppState, tab: &TabKind, cx: &Context<Shell
                     let path = drag.path.clone();
                     sample_state.update(cx, |s, cx| {
                         let v = view_of(&s.workspace.timeline(&TabKind::Song));
-                        let snap = SnapSize::Bar.ticks(s.project.time_signature);
-                        let at = snap_floor(v.tick_at(x).max(0.0), snap);
+                        let at = drop_tick(&v, x, drop_snap, s.project.time_signature);
                         s.add_audio_clip(path, at, cx);
                     });
                 })
@@ -865,8 +870,7 @@ pub fn render(shell: &Shell, state: &AppState, tab: &TabKind, cx: &Context<Shell
                     let id = drag.id.clone();
                     pattern_state.update(cx, |s, cx| {
                         let v = view_of(&s.workspace.timeline(&TabKind::Song));
-                        let snap = SnapSize::Bar.ticks(s.project.time_signature);
-                        let at = snap_floor(v.tick_at(x).max(0.0), snap);
+                        let at = drop_tick(&v, x, drop_snap, s.project.time_signature);
                         let edits = place_pattern(&s.project, &id, at);
                         s.apply(edits, cx);
                     });
@@ -1354,6 +1358,17 @@ mod tests {
         assert!(same_canvas(Some(right), right));
         assert!(!same_canvas(Some(right), left), "the other pane's moves are ignored");
         assert!(!same_canvas(None, left), "no drag, nothing to follow");
+    }
+
+    #[test]
+    fn drops_follow_the_snap_button() {
+        let ts = TimeSignature::default();
+        let view = TimelineView { px_per_tick: 0.1, scroll: 0.0, lane_height: LANE_HEIGHT, header_width: 0.0, ruler_height: 0.0 };
+        // x = 500 px is tick 5000: bar 2 starts at 3840, beat 6 at 4800.
+        assert_eq!(drop_tick(&view, 500.0, SnapSize::Bar, ts), 3840);
+        assert_eq!(drop_tick(&view, 500.0, SnapSize::Beat, ts), 4800);
+        assert_eq!(drop_tick(&view, 500.0, SnapSize::Off, ts), 5000);
+        assert_eq!(drop_tick(&view, -20.0, SnapSize::Off, ts), 0);
     }
 
     #[test]
