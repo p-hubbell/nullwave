@@ -1,7 +1,7 @@
 //! Tracks which documents have unsaved changes.
 
 use crate::TabKind;
-use nw_core::DocPath;
+use nw_core::{Container, DocPath};
 use std::collections::BTreeSet;
 
 #[derive(Default, Debug, Clone)]
@@ -25,11 +25,16 @@ impl DirtyTracker {
 
     pub fn tab_is_dirty(&self, tab: &TabKind) -> bool {
         match tab {
-            TabKind::Pattern(p) => self
-                .paths
-                .iter()
-                .any(|d| matches!(d, DocPath::Notes(q, _) if q == p)),
-            TabKind::PianoRoll(p, i) => self.paths.contains(&DocPath::Notes(p.clone(), i.clone())),
+            TabKind::Pattern(p) | TabKind::PianoRoll(p, _) => self.paths.iter().any(|d| match d {
+                DocPath::PatternLayout(q) => q == p,
+                DocPath::Clip(r) => matches!(&r.container, Container::Pattern(q) if q == p),
+                _ => false,
+            }),
+            TabKind::Song => self.paths.iter().any(|d| match d {
+                DocPath::Arrangement => true,
+                DocPath::Clip(r) => r.container == Container::Song,
+                _ => false,
+            }),
             TabKind::Instrument(i) => self.paths.contains(&DocPath::Instrument(i.clone())),
         }
     }

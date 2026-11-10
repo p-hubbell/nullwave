@@ -1,6 +1,6 @@
 //! Pure-Rust workspace state: tabs, panes, sidebar/panel layout and persistence.
 
-use nw_core::{InstrumentId, PatternId, Project};
+use nw_core::{ClipKey, ClipRef, Container, InstrumentId, PatternId, PlayTarget, Project};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::Path;
@@ -8,8 +8,28 @@ use std::path::Path;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TabKind {
     Pattern(PatternId),
-    PianoRoll(PatternId, InstrumentId),
+    Song,
     Instrument(InstrumentId),
+    /// The first version's piano-roll tab. Kept only so old workspace files still parse;
+    /// loading turns it into its pattern's tab.
+    PianoRoll(PatternId, InstrumentId),
+}
+
+/// Per-tab view state of a timeline (pattern or song) tab.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TimelineTabState {
+    pub tab: TabKind,
+    /// The clip shown in the piano roll under the timeline, if any.
+    pub open_clip: Option<ClipKey>,
+    pub roll_height: f32,
+    pub px_per_beat: f32,
+    pub scroll_ticks: f32,
+}
+
+impl TimelineTabState {
+    pub fn new(tab: TabKind) -> TimelineTabState {
+        TimelineTabState { tab, open_clip: None, roll_height: 240.0, px_per_beat: 24.0, scroll_ticks: 0.0 }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -41,6 +61,8 @@ pub struct WorkspaceState {
     pub panel_visible: bool,
     pub panel_tab: PanelTab,
     pub panel_height: f32,
+    #[serde(default)]
+    pub timelines: Vec<TimelineTabState>,
 }
 
 impl Default for WorkspaceState {
@@ -54,6 +76,7 @@ impl Default for WorkspaceState {
             panel_visible: true,
             panel_tab: PanelTab::Editor,
             panel_height: 180.0,
+            timelines: Vec::new(),
         }
     }
 }
@@ -61,8 +84,9 @@ impl Default for WorkspaceState {
 fn is_valid(tab: &TabKind, project: &Project) -> bool {
     match tab {
         TabKind::Pattern(p) => project.pattern(p).is_some(),
-        TabKind::PianoRoll(p, i) => project.pattern(p).is_some() && project.instrument(i).is_some(),
+        TabKind::Song => true,
         TabKind::Instrument(i) => project.instrument(i).is_some(),
+        TabKind::PianoRoll(..) => false,
     }
 }
 
@@ -167,7 +191,23 @@ impl WorkspaceState {
         self.focused_pane = 1;
     }
 
+    /// Turns legacy piano-roll tabs into their pattern's tab, keeping one tab per pattern.
+    fn upgrade_legacy_tabs(&mut self) {
+        for pane in &mut self.panes {
+            let active = pane.active.and_then(|a| pane.tabs.get(a)).cloned().map(upgraded);
+            let mut tabs: Vec<TabKind> = Vec::with_capacity(pane.tabs.len());
+            for tab in std::mem::take(&mut pane.tabs).into_iter().map(upgraded) {
+                if !tabs.contains(&tab) {
+                    tabs.push(tab);
+                }
+            }
+            pane.active = active.and_then(|a| tabs.iter().position(|t| *t == a));
+            pane.tabs = tabs;
+        }
+    }
+
     pub fn retain_valid(&mut self, project: &Project) {
+        self.upgrade_legacy_tabs();
         for pane in &mut self.panes {
             let old_active = pane.active;
             let mut kept = Vec::with_capacity(pane.tabs.len());
@@ -191,10 +231,28 @@ impl WorkspaceState {
         self.normalize();
     }
 
-    pub fn active_pattern(&self) -> Option<PatternId> {
+    /// What Space plays: the focused pattern or the song.
+    pub fn play_target(&self) -> Option<PlayTarget> {
         match self.active_tab()? {
-            TabKind::Pattern(p) | TabKind::PianoRoll(p, _) => Some(p.clone()),
+            TabKind::Pattern(p) | TabKind::PianoRoll(p, _) => Some(PlayTarget::Pattern(p.clone())),
+            TabKind::Song => Some(PlayTarget::Song),
             TabKind::Instrument(_) => None,
+        }
+    }
+
+    /// The tab's timeline view state (defaults if none was saved).
+    pub fn timeline(&self, tab: &TabKind) -> TimelineTabState {
+        self.timelines
+            .iter()
+            .find(|t| &t.tab == tab)
+            .cloned()
+            .unwrap_or_else(|| TimelineTabState::new(tab.clone()))
+    }
+
+    pub fn set_timeline(&mut self, state: TimelineTabState) {
+        match self.timelines.iter_mut().find(|t| t.tab == state.tab) {
+            Some(t) => *t = state,
+            None => self.timelines.push(state),
         }
     }
 }
@@ -205,11 +263,41 @@ pub fn tab_title(tab: &TabKind, project: &Project) -> String {
         |id: &InstrumentId| project.instrument(id).map_or_else(|| id.0.clone(), |i| i.name.clone());
     match tab {
         TabKind::Pattern(p) => pattern(p),
+        TabKind::Song => "Song".to_string(),
         TabKind::PianoRoll(p, i) => format!("{} / {}", pattern(p), instrument(i)),
         TabKind::Instrument(i) => match project.instrument(i) {
             Some(inst) => format!("Sampler: {}", inst.name),
             None => i.0.clone(),
         },
+    }
+}
+
+fn upgraded(tab: TabKind) -> TabKind {
+    match tab {
+        TabKind::PianoRoll(p, _) => TabKind::Pattern(p),
+        other => other,
+    }
+}
+
+/// The piano roll's header for a clip, saying what else changes when it is edited:
+/// `Pattern 1 › bell 2 · used 3×`, with `pattern placed 2× in song` when the pattern is
+/// placed, or `Song › bell 3 · used 2×` for a loose clip.
+pub fn clip_header(project: &Project, clip: &ClipRef) -> String {
+    let instrument =
+        project.instrument(&clip.key.instrument).map_or_else(|| clip.key.instrument.0.clone(), |i| i.name.clone());
+    let uses = project.timeline(&clip.container).map_or(0, |t| t.uses(&clip.key));
+    let name = format!("{instrument} {}", clip.key.number);
+    match &clip.container {
+        Container::Song => format!("Song › {name} · used {uses}×"),
+        Container::Pattern(id) => {
+            let pattern = project.pattern(id).map_or_else(|| id.0.clone(), |p| p.name.clone());
+            let placed = project.song.patterns.iter().filter(|pp| &pp.pattern == id).count();
+            if placed == 0 {
+                format!("{pattern} › {name} · used {uses}×")
+            } else {
+                format!("{pattern} › {name} · {uses}× in pattern, pattern placed {placed}× in song")
+            }
+        }
     }
 }
 
