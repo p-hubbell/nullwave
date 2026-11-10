@@ -1,6 +1,7 @@
 pub mod arrange;
 pub mod clip;
 pub mod edit;
+pub mod flatten;
 pub mod history;
 pub mod model;
 pub mod naming;
@@ -10,6 +11,7 @@ pub mod time;
 pub use arrange::*;
 pub use clip::*;
 pub use edit::*;
+pub use flatten::*;
 pub use history::*;
 pub use model::*;
 pub use naming::*;

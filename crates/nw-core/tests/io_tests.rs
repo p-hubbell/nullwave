@@ -315,3 +315,20 @@ fn v1_fixture_migrates() {
     let (again, _) = load_project(t.path()).unwrap();
     assert_eq!(again, p);
 }
+
+#[test]
+fn v1_sounds_the_same() {
+    let t = fixture();
+    let (p, _) = load_project(t.path()).unwrap();
+    let text = fs::read_to_string(t.path().join("patterns/pattern-1/bell.ron")).unwrap();
+    let bell = text.matches("pitch:").count();
+    let text = fs::read_to_string(t.path().join("patterns/pattern-1/kick.ron")).unwrap();
+    let kick = text.matches("pitch:").count();
+    let flat = pattern_notes(&p, &pid("pattern-1"));
+    assert_eq!(flat.len(), bell + kick);
+    let bells: Vec<(Tick, u8, Tick)> =
+        flat.iter().filter(|n| n.instrument == id("bell")).map(|n| (n.tick, n.pitch, n.length)).collect();
+    assert_eq!(bells, vec![(480, 72, 960), (5000, 76, 3000)]);
+    let kicks: Vec<Tick> = flat.iter().filter(|n| n.instrument == id("kick")).map(|n| n.tick).collect();
+    assert_eq!(kicks, vec![0, 1920, 3840]);
+}
