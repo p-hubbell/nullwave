@@ -70,7 +70,19 @@ pub struct TimelineUi {
     pub focus: FocusHandle,
     pub selection: Vec<Sel>,
     pub drag: Option<TlDrag>,
+    /// Window position of the canvas the drag started in (a split can show the tab twice).
+    pub drag_canvas: Option<Point<f32>>,
     pub snap: SnapSize,
+}
+
+/// Whether a mouse event from the canvas at `here` belongs to the drag that started in the
+/// canvas at `started`. Every canvas showing a tab receives every mouse move.
+pub fn same_canvas(started: Option<Point<f32>>, here: Point<f32>) -> bool {
+    started.is_some_and(|s| (s.x - here.x).abs() < 0.5 && (s.y - here.y).abs() < 0.5)
+}
+
+fn origin(bounds: Bounds<Pixels>) -> Point<f32> {
+    point(f32::from(bounds.origin.x), f32::from(bounds.origin.y))
 }
 
 pub type Timelines = HashMap<TabKind, TimelineUi>;
@@ -261,6 +273,7 @@ impl Shell {
                 focus: cx.focus_handle(),
                 selection: Vec::new(),
                 drag: None,
+                drag_canvas: None,
                 snap: SnapSize::default(),
             });
         }
@@ -282,15 +295,16 @@ impl Shell {
     fn tl_mouse_down(
         &mut self,
         tab: &TabKind,
-        pos: Point<f32>,
+        (canvas, pos): (Point<f32>, Point<f32>),
         button: MouseButton,
         modifiers: Modifiers,
         window: &mut Window,
         cx: &mut Context<Shell>,
     ) {
         let Some(container) = container_of(tab) else { return };
-        if let Some(ui) = self.timelines.get(tab) {
+        if let Some(ui) = self.timelines.get_mut(tab) {
             window.focus(&ui.focus);
+            ui.drag_canvas = Some(canvas);
         }
         let snap = self.snap_ticks(tab, modifiers, cx);
         let state = self.state.read(cx);
@@ -402,10 +416,13 @@ impl Shell {
         cx.notify();
     }
 
-    fn tl_mouse_move(&mut self, tab: &TabKind, pos: Point<f32>, modifiers: Modifiers, cx: &mut Context<Shell>) {
+    fn tl_mouse_move(&mut self, tab: &TabKind, canvas: Point<f32>, pos: Point<f32>, modifiers: Modifiers, cx: &mut Context<Shell>) {
         let snap = self.snap_ticks(tab, modifiers, cx);
         let view = view_of(&self.state.read(cx).workspace.timeline(tab));
         let Some(ui) = self.timelines.get_mut(tab) else { return };
+        if !same_canvas(ui.drag_canvas, canvas) {
+            return;
+        }
         let tick = view.tick_at(pos.x);
         let changed = match &mut ui.drag {
             Some(TlDrag::Move { origin, delta, .. })
@@ -1208,7 +1225,7 @@ fn lanes_canvas(
                     return;
                 }
                 let pos = local(bounds, e.position);
-                down_shell.update(cx, |sh, cx| sh.tl_mouse_down(&down_tab, pos, e.button, e.modifiers, window, cx));
+                down_shell.update(cx, |sh, cx| sh.tl_mouse_down(&down_tab, (origin(bounds), pos), e.button, e.modifiers, window, cx));
                 cx.stop_propagation();
             });
             let (move_shell, move_tab) = (shell.clone(), tab.clone());
@@ -1217,7 +1234,7 @@ fn lanes_canvas(
                     return;
                 }
                 let pos = local(bounds, e.position);
-                move_shell.update(cx, |sh, cx| sh.tl_mouse_move(&move_tab, pos, e.modifiers, cx));
+                move_shell.update(cx, |sh, cx| sh.tl_mouse_move(&move_tab, origin(bounds), pos, e.modifiers, cx));
             });
             let (up_shell, up_tab) = (shell.clone(), tab.clone());
             window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
@@ -1327,6 +1344,16 @@ mod tests {
 
     fn clip_sel(at: Tick) -> Sel {
         Sel::Clip { container: Container::Pattern(PatternId("p1".into())), placement: Placement { clip: key(1), at } }
+    }
+
+    #[test]
+    fn drags_follow_only_the_canvas_they_started_in() {
+        // The same tab split into two panes: both canvases see every mouse move.
+        let left = point(200.0, 80.0);
+        let right = point(900.0, 80.0);
+        assert!(same_canvas(Some(right), right));
+        assert!(!same_canvas(Some(right), left), "the other pane's moves are ignored");
+        assert!(!same_canvas(None, left), "no drag, nothing to follow");
     }
 
     #[test]

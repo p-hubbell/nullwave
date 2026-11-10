@@ -25,6 +25,7 @@ use crate::theme;
 use crate::ui::instrument_tab::note_name;
 use crate::ui::shell::Shell;
 use crate::ui::status_bar::format_position;
+use crate::ui::timeline::same_canvas;
 
 pub const KEYBOARD_WIDTH: f32 = 40.0;
 const SNAP: Tick = DEFAULT_SNAP;
@@ -47,6 +48,8 @@ pub struct RollState {
     pub last_length: Tick,
     pub focus: FocusHandle,
     drag: Option<RollDrag>,
+    /// Window position of the grid the drag started in (a split can show the clip twice).
+    drag_canvas: Option<Point<f32>>,
     /// The note under the cursor, for the hover label.
     hover: Option<usize>,
     /// Sub-row vertical scroll left over from trackpad deltas.
@@ -76,6 +79,7 @@ impl RollState {
             last_length: SNAP * 4,
             focus: cx.focus_handle(),
             drag: None,
+            drag_canvas: None,
             hover: None,
             scroll_rest: 0.0,
         }
@@ -211,7 +215,7 @@ impl Shell {
     fn roll_mouse_down(
         &mut self,
         key: &RollKey,
-        pos: Point<f32>,
+        (canvas, pos): (Point<f32>, Point<f32>),
         button: MouseButton,
         modifiers: Modifiers,
         window: &mut Window,
@@ -220,6 +224,7 @@ impl Shell {
         let notes = notes_of(self.state.read(cx), key).to_vec();
         let Some(roll) = self.rolls.get_mut(key) else { return };
         window.focus(&roll.focus);
+        roll.drag_canvas = Some(canvas);
         let hit = hit_test(&notes, &roll.view, pos.x, pos.y, SNAP);
         match (button, hit) {
             (MouseButton::Right, Hit::Body(i) | Hit::RightEdge(i)) => {
@@ -274,9 +279,13 @@ impl Shell {
         cx.notify();
     }
 
-    fn roll_mouse_move(&mut self, key: &RollKey, pos: Point<f32>, hovered: bool, cx: &mut Context<Shell>) {
+    fn roll_mouse_move(&mut self, key: &RollKey, canvas: Point<f32>, pos: Point<f32>, hovered: bool, cx: &mut Context<Shell>) {
         let notes = notes_of(self.state.read(cx), key).to_vec();
         let Some(roll) = self.rolls.get_mut(key) else { return };
+        // The clip can be open under two tabs at once; follow only the grid the drag began in.
+        if roll.drag.is_some() && !same_canvas(roll.drag_canvas, canvas) {
+            return;
+        }
         let view = roll.view;
         match &mut roll.drag {
             Some(RollDrag::Move { origin, before, preview }) => {
@@ -658,6 +667,10 @@ fn keyboard(view: &PianoRollView) -> impl IntoElement {
         .children(rows)
 }
 
+fn grid_origin(bounds: Bounds<Pixels>) -> Point<f32> {
+    point(f32::from(bounds.origin.x), f32::from(bounds.origin.y))
+}
+
 fn local(bounds: Bounds<Pixels>, p: Point<Pixels>) -> Point<f32> {
     point(f32::from(p.x - bounds.origin.x), f32::from(p.y - bounds.origin.y))
 }
@@ -678,7 +691,7 @@ fn grid(shell: Entity<Shell>, key: RollKey, frame: GridFrame) -> gpui::Canvas<Hi
                     return;
                 }
                 let pos = local(bounds, e.position);
-                down_shell.update(cx, |sh, cx| sh.roll_mouse_down(&down_key, pos, e.button, e.modifiers, window, cx));
+                down_shell.update(cx, |sh, cx| sh.roll_mouse_down(&down_key, (grid_origin(bounds), pos), e.button, e.modifiers, window, cx));
                 cx.stop_propagation();
             });
             let (move_shell, move_key, move_hitbox) = (shell.clone(), key.clone(), hitbox.clone());
@@ -688,7 +701,7 @@ fn grid(shell: Entity<Shell>, key: RollKey, frame: GridFrame) -> gpui::Canvas<Hi
                 }
                 let hovered = move_hitbox.is_hovered(window);
                 let pos = local(bounds, e.position);
-                move_shell.update(cx, |sh, cx| sh.roll_mouse_move(&move_key, pos, hovered, cx));
+                move_shell.update(cx, |sh, cx| sh.roll_mouse_move(&move_key, grid_origin(bounds), pos, hovered, cx));
             });
             let (up_shell, up_key) = (shell.clone(), key.clone());
             window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
