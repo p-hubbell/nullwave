@@ -120,6 +120,8 @@ pub struct VoiceStart {
     pub params: VoiceParams,
     /// Output frames until release begins; `None` to play to the region end.
     pub duration_samples: Option<u64>,
+    /// Source frames into the region to start from (audio picked up mid-file).
+    pub offset: f64,
     pub age: u64,
 }
 
@@ -311,7 +313,7 @@ impl Voice {
         let len = s.sample.left.len().min(s.sample.right.len());
         self.sample = Some(s.sample);
         self.region = s.region;
-        self.pos = s.region.start as f64;
+        self.pos = s.region.start as f64 + s.offset.max(0.0);
         self.dir = 1.0;
         self.rate = s.rate;
         self.params = s.params;
@@ -324,7 +326,7 @@ impl Voice {
         self.glide = None;
         self.volume_env.start(s.params.volume_env);
         self.modulation.start(&s.params, s.age as u32);
-        if s.region.start >= s.region.end.min(len) {
+        if self.pos >= s.region.end.min(len) as f64 {
             // Nothing to play.
             self.sample = None;
             return;

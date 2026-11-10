@@ -106,7 +106,7 @@ fn build_stream(
     let sample_rate = config.sample_rate;
     let initial = Owned::new(
         collector,
-        Snapshot { tempo: 140.0, loop_length: 3840, instruments: Vec::new(), events: Vec::new() },
+        Snapshot { tempo: 140.0, length: 3840, looping: true, instruments: Vec::new(), events: Vec::new() },
     );
     let mut core = EngineCore::new(sample_rate, initial);
     let (command_tx, mut command_rx) = rtrb::RingBuffer::new(COMMAND_CAPACITY);

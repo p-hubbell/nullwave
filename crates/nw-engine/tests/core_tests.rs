@@ -1,8 +1,7 @@
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use basedrop::{Collector, Owned, Shared};
-use nw_core::{Envelope, Instrument, InstrumentId, Note, Pattern, PatternId, Project, Tick};
+use nw_core::{Clip, ClipKey, Envelope, Instrument, InstrumentId, Note, Pattern, PatternId, Placement, PlayTarget, Project, Tick, Timeline};
 use nw_engine::core::{Command, EngineCore, FADE_RESERVE, Feedback, MAX_VOICES, run_block};
 use nw_engine::process::PlayRegion;
 use nw_engine::sample::{SampleBuffer, SampleCache};
@@ -42,7 +41,7 @@ fn snap(
     instruments: Vec<InstrumentSnapshot>,
     events: Vec<NoteEvent>,
 ) -> Owned<Snapshot> {
-    Owned::new(&c.handle(), Snapshot { tempo, loop_length, instruments, events })
+    Owned::new(&c.handle(), Snapshot { tempo, length: loop_length, looping: true, instruments, events })
 }
 
 /// Process `frames` frames in blocks of `block` and return the left channel.
@@ -136,12 +135,15 @@ fn project_with(path: Option<PathBuf>, notes: Vec<Note>) -> (Project, PatternId)
     instrument.sampler.volume_env.attack_ms = -5.0;
     instrument.sampler.volume_env.release_ms = -1.0;
     let pid = PatternId("p1".into());
-    let mut map = BTreeMap::new();
-    map.insert(id, notes);
+    let key = ClipKey { instrument: id, number: 1 };
+    let timeline = Timeline {
+        clips: vec![Clip { key: key.clone(), start: 0, length: 3840, notes }],
+        placements: vec![Placement { clip: key, at: 0 }],
+    };
     let project = Project {
         tempo: 128.0,
         instruments: vec![instrument],
-        patterns: vec![Pattern { id: pid.clone(), name: "P1".into(), notes: map }],
+        patterns: vec![Pattern { id: pid.clone(), name: "P1".into(), timeline }],
         ..Project::default()
     };
     (project, pid)
@@ -156,9 +158,9 @@ fn compile_marks_missing_sample_as_none() {
         Note { pitch: 60, start: 0, length: 480, velocity: 100 },
     ];
     let (project, pid) = project_with(Some("/nonexistent.wav".into()), notes);
-    let s = compile_snapshot(&project, Some(&pid), &mut cache);
+    let s = compile_snapshot(&project, Some(&PlayTarget::Pattern(pid.clone())), &mut cache);
     assert_eq!(s.tempo, 128.0);
-    assert_eq!(s.loop_length, project.pattern_length(&pid));
+    assert_eq!(s.length, project.pattern_length(&pid));
     assert_eq!(s.instruments.len(), 1);
     assert!(s.instruments[0].sample.is_none());
     // Clamped inputs.
@@ -175,7 +177,7 @@ fn compile_marks_missing_sample_as_none() {
     let s = compile_snapshot(&project, None, &mut cache);
     assert!(s.events.is_empty());
     assert!(s.instruments[0].sample.is_none());
-    assert_eq!(s.loop_length, project.time_signature.ticks_per_bar());
+    assert_eq!(s.length, project.time_signature.ticks_per_bar());
 }
 
 #[test]
