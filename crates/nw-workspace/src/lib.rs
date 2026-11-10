@@ -12,3 +12,4 @@ pub use palette::*;
 pub use browser::*;
 pub use settings::*;
 pub mod piano_roll;
+pub mod timeline;

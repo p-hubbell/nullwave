@@ -15,6 +15,7 @@ use crate::ui::components::{TextField, TextFieldEvent};
 use crate::ui::instrument_tab::{InstDrag, InstView};
 use crate::ui::palette::PaletteState;
 use crate::ui::piano_roll::Rolls;
+use crate::ui::timeline::{Timelines, container_of};
 use crate::ui::sidebar::SidebarState;
 use crate::ui::{bottom_panel, editor_area, modal, palette, sidebar, status_bar};
 
@@ -47,8 +48,10 @@ pub struct Shell {
     pub inst_drag: Option<InstDrag>,
     /// Which envelope and LFO each instrument tab shows.
     pub inst_views: std::collections::HashMap<nw_core::InstrumentId, InstView>,
-    /// State of each open piano roll tab (view, selection, drag).
+    /// State of each clip open in a piano roll under a timeline (view, selection, drag).
     pub rolls: Rolls,
+    /// Selection, drag and snap of each open pattern or song tab.
+    pub timelines: Timelines,
     pub palette: Option<PaletteState>,
     /// Focus for the front in-window prompt.
     pub modal_focus: FocusHandle,
@@ -65,6 +68,7 @@ impl Shell {
         });
         let subscriptions = vec![
             cx.observe_in(&state, window, |shell, _, window, cx| {
+                shell.sync_timelines(cx);
                 shell.sync_rolls(cx);
                 shell.sync_modal_focus(window, cx);
                 cx.notify();
@@ -85,12 +89,14 @@ impl Shell {
             inst_drag: None,
             inst_views: std::collections::HashMap::new(),
             rolls: Rolls::new(),
+            timelines: Timelines::new(),
             palette: None,
             modal_focus: cx.focus_handle(),
             modal_shown: false,
             split_ratio: 0.5,
             _subscriptions: subscriptions,
         };
+        shell.sync_timelines(cx);
         shell.sync_rolls(cx);
         if shell.state.read(cx).workspace.sidebar_view == SidebarView::Search {
             shell.refresh_search_index(cx);
@@ -246,11 +252,21 @@ impl Shell {
         cx.notify();
     }
 
-    /// The instrument of the active tab (a sampler tab or a piano roll).
+    /// The instrument of the active tab: a sampler tab, or the clip open under a timeline.
     fn active_instrument(&self, cx: &App) -> Option<nw_core::InstrumentId> {
-        match self.state.read(cx).workspace.active_tab()? {
-            TabKind::Instrument(i) | TabKind::PianoRoll(_, i) => Some(i.clone()),
-            TabKind::Pattern(_) => None,
+        let ws = &self.state.read(cx).workspace;
+        match ws.active_tab()? {
+            TabKind::Instrument(i) => Some(i.clone()),
+            tab if container_of(tab).is_some() => ws.timeline(tab).open_clip.map(|r| r.key.instrument),
+            _ => None,
+        }
+    }
+
+    /// The pattern of the active tab, if it is a pattern tab.
+    fn active_pattern(&self, cx: &App) -> Option<PatternId> {
+        match self.state.read(cx).workspace.play_target()? {
+            nw_core::PlayTarget::Pattern(p) => Some(p),
+            nw_core::PlayTarget::Song => None,
         }
     }
 
@@ -327,22 +343,33 @@ impl Shell {
     fn new_pattern(&mut self, _: &project::NewPattern, window: &mut Window, cx: &mut Context<Self>) {
         self.create_pattern(window, cx);
     }
-    /// Adds a pattern, opens its rack and starts renaming it in the sidebar.
+    /// Adds a pattern, opens its timeline and starts renaming it in the sidebar.
     pub fn create_pattern(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.state.update(cx, |s, cx| s.new_pattern(cx)) {
             self.begin_pattern_rename(id, window, cx);
         }
     }
     fn rename_pattern(&mut self, _: &pattern::Rename, window: &mut Window, cx: &mut Context<Self>) {
-        match self.state.read(cx).workspace.active_pattern() {
+        match self.active_pattern(cx) {
             Some(id) => self.begin_pattern_rename(id, window, cx),
             None => self.log(cx, "Rename Pattern: open a pattern first"),
         }
     }
     fn delete_pattern(&mut self, _: &pattern::Delete, _: &mut Window, cx: &mut Context<Self>) {
-        match self.state.read(cx).workspace.active_pattern() {
+        match self.active_pattern(cx) {
             Some(id) => self.state.update(cx, |s, cx| s.delete_pattern(&id, cx)),
             None => self.log(cx, "Delete Pattern: open a pattern first"),
+        }
+    }
+    fn duplicate_pattern(&mut self, _: &pattern::Duplicate, _: &mut Window, cx: &mut Context<Self>) {
+        match self.active_pattern(cx) {
+            Some(id) => self.state.update(cx, |s, cx| s.duplicate_pattern(&id, cx)),
+            None => self.log(cx, "Duplicate Pattern: open a pattern first"),
+        }
+    }
+    fn open_song(&mut self, _: &project::OpenSong, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).project_dir.is_some() {
+            self.state.update(cx, |s, cx| s.open_tab(TabKind::Song, cx));
         }
     }
     fn delete_instrument(&mut self, _: &instrument::Delete, _: &mut Window, cx: &mut Context<Self>) {
@@ -431,6 +458,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::new_pattern))
             .on_action(cx.listener(Self::rename_pattern))
             .on_action(cx.listener(Self::delete_pattern))
+            .on_action(cx.listener(Self::duplicate_pattern))
+            .on_action(cx.listener(Self::open_song))
             .on_action(cx.listener(Self::delete_instrument))
             .on_action(cx.listener(Self::add_sample_folder))
             .on_action(cx.listener(Self::undo))

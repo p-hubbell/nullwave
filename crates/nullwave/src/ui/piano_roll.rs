@@ -1,8 +1,9 @@
 //! Piano roll editor and its velocity lane (shown in the bottom panel's Editor tab).
 //!
 //! Geometry and note math live in `nw_workspace::piano_roll`; this module draws them and
-//! turns mouse and keyboard input into edits. A drag edits a local copy of the notes and
-//! commits one `ReplaceNotes` on release, so ⌘Z undoes the whole drag.
+//! turns mouse and keyboard input into edits. The roll edits one clip and sits under its
+//! timeline (pattern or song tab). A drag edits a local copy of the notes and commits the
+//! clip's new notes on release, so ⌘Z undoes the whole drag.
 
 use std::collections::HashMap;
 
@@ -11,7 +12,7 @@ use gpui::{
     Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba,
     ScrollWheelEvent, Window, canvas, div, fill, point, prelude::*, px, rgb, rgba, size,
 };
-use nw_core::{Edit, InstrumentId, Note, PPQ, PatternId, Tick, TimeSignature};
+use nw_core::{ClipRef, Note, PPQ, Tick, TimeSignature, edit_clip_notes};
 use nw_workspace::piano_roll::{
     DEFAULT_SNAP, Hit, PianoRollView, duplicated, hit_test, moved, place_note, resized,
     with_velocity,
@@ -24,6 +25,7 @@ use crate::theme;
 use crate::ui::instrument_tab::note_name;
 use crate::ui::shell::Shell;
 use crate::ui::status_bar::format_position;
+use crate::ui::timeline::same_canvas;
 
 pub const KEYBOARD_WIDTH: f32 = 40.0;
 const SNAP: Tick = DEFAULT_SNAP;
@@ -35,17 +37,19 @@ const VELOCITY_BAR_WIDTH: f32 = 4.0;
 /// A preview note sounds at most this long.
 const MAX_PREVIEW_TICKS: Tick = PPQ * 2;
 
-pub type RollKey = (PatternId, InstrumentId);
+pub type RollKey = ClipRef;
 
-/// Per-tab piano roll state. Lives in `Shell::rolls` while the roll's tab is open.
+/// Per-clip piano roll state. Lives in `Shell::rolls` while a timeline tab shows the clip.
 pub struct RollState {
     pub view: PianoRollView,
-    /// Indices into the instrument's notes in this pattern.
+    /// Indices into the clip's notes.
     pub selected: Vec<usize>,
     /// Length for newly placed notes: the last note clicked or resized.
     pub last_length: Tick,
     pub focus: FocusHandle,
     drag: Option<RollDrag>,
+    /// Window position of the grid the drag started in (a split can show the clip twice).
+    drag_canvas: Option<Point<f32>>,
     /// The note under the cursor, for the hover label.
     hover: Option<usize>,
     /// Sub-row vertical scroll left over from trackpad deltas.
@@ -75,6 +79,7 @@ impl RollState {
             last_length: SNAP * 4,
             focus: cx.focus_handle(),
             drag: None,
+            drag_canvas: None,
             hover: None,
             scroll_rest: 0.0,
         }
@@ -96,7 +101,29 @@ impl RollState {
 }
 
 fn notes_of<'a>(state: &'a AppState, key: &RollKey) -> &'a [Note] {
-    state.project.pattern(&key.0).and_then(|p| p.notes.get(&key.1)).map_or(&[][..], Vec::as_slice)
+    state.project.timeline(&key.container).and_then(|t| t.clip(&key.key)).map_or(&[][..], |c| c.notes.as_slice())
+}
+
+/// `notes` with one instance of each of `remove` taken out and `add` put in.
+fn swapped(notes: &[Note], remove: &[Note], add: &[Note]) -> Vec<Note> {
+    let mut out = notes.to_vec();
+    for r in remove {
+        if let Some(i) = out.iter().position(|n| n == r) {
+            out.remove(i);
+        }
+    }
+    out.extend(add.iter().cloned());
+    out
+}
+
+/// Commits the clip's whole note list as one undo step.
+fn set_notes(shell: &mut Shell, key: &RollKey, notes: Vec<Note>, cx: &mut Context<Shell>) {
+    shell.state.update(cx, |s, cx| {
+        let edits = edit_clip_notes(&s.project, key, notes);
+        if !edits.is_empty() {
+            s.apply(edits, cx);
+        }
+    });
 }
 
 /// Indices in `notes` of each note in `wanted`, each index used at most once.
@@ -134,7 +161,8 @@ fn row_of(view: &PianoRollView, y: f32) -> i64 {
 }
 
 impl Shell {
-    /// Keeps one `RollState` per open piano roll tab: adds new ones, drops closed ones.
+    /// Keeps one `RollState` per clip open under a timeline tab: adds new ones, drops
+    /// closed ones.
     pub fn sync_rolls(&mut self, cx: &mut Context<Shell>) {
         let state = self.state.read(cx);
         let open: Vec<RollKey> = state
@@ -142,10 +170,9 @@ impl Shell {
             .panes
             .iter()
             .flat_map(|p| p.tabs.iter())
-            .filter_map(|t| match t {
-                TabKind::PianoRoll(p, i) => Some((p.clone(), i.clone())),
-                _ => None,
-            })
+            .filter(|t| matches!(t, TabKind::Pattern(_) | TabKind::Song))
+            .filter_map(|t| state.workspace.timeline(t).open_clip)
+            .filter(|r| state.project.timeline(&r.container).is_some_and(|t| t.clip(&r.key).is_some()))
             .collect();
         self.rolls.retain(|k, _| open.contains(k));
         for key in open {
@@ -175,8 +202,8 @@ fn commit_replace(shell: &mut Shell, key: &RollKey, before: Vec<Note>, after: Ve
     if before == after {
         return;
     }
-    let edit = Edit::ReplaceNotes { pattern: key.0.clone(), instrument: key.1.clone(), before, after: after.clone() };
-    shell.state.update(cx, |s, cx| s.apply(vec![edit], cx));
+    let full = swapped(notes_of(shell.state.read(cx), key), &before, &after);
+    set_notes(shell, key, full, cx);
     let notes = notes_of(shell.state.read(cx), key).to_vec();
     if let Some(roll) = shell.rolls.get_mut(key) {
         roll.selected = reselect(&notes, &after);
@@ -188,7 +215,7 @@ impl Shell {
     fn roll_mouse_down(
         &mut self,
         key: &RollKey,
-        pos: Point<f32>,
+        (canvas, pos): (Point<f32>, Point<f32>),
         button: MouseButton,
         modifiers: Modifiers,
         window: &mut Window,
@@ -197,17 +224,14 @@ impl Shell {
         let notes = notes_of(self.state.read(cx), key).to_vec();
         let Some(roll) = self.rolls.get_mut(key) else { return };
         window.focus(&roll.focus);
+        roll.drag_canvas = Some(canvas);
         let hit = hit_test(&notes, &roll.view, pos.x, pos.y, SNAP);
         match (button, hit) {
             (MouseButton::Right, Hit::Body(i) | Hit::RightEdge(i)) => {
                 roll.selected.clear();
                 roll.hover = None;
-                let edit = Edit::RemoveNotes {
-                    pattern: key.0.clone(),
-                    instrument: key.1.clone(),
-                    notes: vec![notes[i].clone()],
-                };
-                self.state.update(cx, |s, cx| s.apply(vec![edit], cx));
+                let full = swapped(&notes, &[notes[i].clone()], &[]);
+                set_notes(self, key, full, cx);
             }
             (MouseButton::Left, Hit::Body(i)) => {
                 roll.last_length = notes[i].length;
@@ -225,7 +249,7 @@ impl Shell {
                 }
                 let n = &notes[i];
                 let (pitch, velocity, length) = (n.pitch, n.velocity, n.length);
-                self.state.update(cx, |s, _| s.preview_note(&key.1, pitch, velocity, length.min(MAX_PREVIEW_TICKS)));
+                self.state.update(cx, |s, _| s.preview_note(&key.key.instrument, pitch, velocity, length.min(MAX_PREVIEW_TICKS)));
             }
             (MouseButton::Left, Hit::RightEdge(i)) => {
                 if !roll.is_selected(i) {
@@ -240,14 +264,9 @@ impl Shell {
                     roll.drag = Some(RollDrag::Rubber { origin: pos, current: pos, base });
                 } else if pos.y >= 0.0 {
                     let note = place_note(tick, pitch, roll.last_length);
-                    let edit = Edit::AddNotes {
-                        pattern: key.0.clone(),
-                        instrument: key.1.clone(),
-                        notes: vec![note.clone()],
-                    };
-                    self.state.update(cx, |s, cx| {
-                        s.apply(vec![edit], cx);
-                        s.preview_note(&key.1, note.pitch, note.velocity, note.length.min(MAX_PREVIEW_TICKS));
+                    set_notes(self, key, swapped(&notes, &[], std::slice::from_ref(&note)), cx);
+                    self.state.update(cx, |s, _| {
+                        s.preview_note(&key.key.instrument, note.pitch, note.velocity, note.length.min(MAX_PREVIEW_TICKS));
                     });
                     let notes = notes_of(self.state.read(cx), key).to_vec();
                     if let Some(roll) = self.rolls.get_mut(key) {
@@ -260,9 +279,13 @@ impl Shell {
         cx.notify();
     }
 
-    fn roll_mouse_move(&mut self, key: &RollKey, pos: Point<f32>, hovered: bool, cx: &mut Context<Shell>) {
+    fn roll_mouse_move(&mut self, key: &RollKey, canvas: Point<f32>, pos: Point<f32>, hovered: bool, cx: &mut Context<Shell>) {
         let notes = notes_of(self.state.read(cx), key).to_vec();
         let Some(roll) = self.rolls.get_mut(key) else { return };
+        // The clip can be open under two tabs at once; follow only the grid the drag began in.
+        if roll.drag.is_some() && !same_canvas(roll.drag_canvas, canvas) {
+            return;
+        }
         let view = roll.view;
         match &mut roll.drag {
             Some(RollDrag::Move { origin, before, preview }) => {
@@ -420,8 +443,7 @@ impl Shell {
                 roll.selected.clear();
                 roll.hover = None;
             }
-            let edit = Edit::RemoveNotes { pattern: key.0.clone(), instrument: key.1.clone(), notes: doomed };
-            shell.state.update(cx, |s, cx| s.apply(vec![edit], cx));
+            set_notes(shell, key, swapped(&notes, &doomed, &[]), cx);
         });
     }
 
@@ -440,8 +462,7 @@ impl Shell {
             if added.is_empty() {
                 return;
             }
-            let edit = Edit::AddNotes { pattern: key.0.clone(), instrument: key.1.clone(), notes: added.clone() };
-            shell.state.update(cx, |s, cx| s.apply(vec![edit], cx));
+            set_notes(shell, key, swapped(&notes, &[], &added), cx);
             let now = notes_of(shell.state.read(cx), key).to_vec();
             if let Some(roll) = shell.rolls.get_mut(key) {
                 roll.selected = reselect(&now, &added);
@@ -492,7 +513,7 @@ fn beat_line() -> Rgba {
 fn bar_line() -> Rgba {
     rgba(0xffffff36)
 }
-fn past_end() -> Rgba {
+fn outside_window() -> Rgba {
     rgba(0x00000066)
 }
 fn note_fill() -> Rgba {
@@ -520,26 +541,32 @@ struct GridFrame {
     view: PianoRollView,
     notes: Vec<Note>,
     selected: Vec<usize>,
-    length: Tick,
+    /// The clip's audible window `[start, end)`; outside it is dimmed.
+    window: (Tick, Tick),
     ts: TimeSignature,
     playhead: Option<Tick>,
     rubber: Option<(Point<f32>, Point<f32>)>,
 }
 
-pub fn render(shell: &Shell, state: &AppState, key: &RollKey, cx: &Context<Shell>) -> AnyElement {
+/// The roll for `key`; `playhead` is in clip-local ticks when the clip is playing.
+pub fn render(shell: &Shell, state: &AppState, key: &RollKey, playhead: Option<Tick>, cx: &Context<Shell>) -> AnyElement {
     let Some(roll) = shell.rolls.get(key) else {
         return div().into_any_element();
     };
     let stored = notes_of(state, key);
     let notes = roll.shown(stored).to_vec();
-    let playing_here = state.playing && state.last_played_pattern.as_ref() == Some(&key.0);
+    let window = state
+        .project
+        .timeline(&key.container)
+        .and_then(|t| t.clip(&key.key))
+        .map_or((0, 0), |c| (c.start, c.start + c.length));
     let frame = GridFrame {
         view: roll.view,
         notes: notes.clone(),
         selected: roll.selected.clone(),
-        length: state.project.pattern_length(&key.0),
+        window,
         ts: state.project.time_signature,
-        playhead: playing_here.then_some(state.playhead),
+        playhead,
         rubber: match &roll.drag {
             Some(RollDrag::Rubber { origin, current, .. }) => Some((*origin, *current)),
             _ => None,
@@ -640,6 +667,10 @@ fn keyboard(view: &PianoRollView) -> impl IntoElement {
         .children(rows)
 }
 
+fn grid_origin(bounds: Bounds<Pixels>) -> Point<f32> {
+    point(f32::from(bounds.origin.x), f32::from(bounds.origin.y))
+}
+
 fn local(bounds: Bounds<Pixels>, p: Point<Pixels>) -> Point<f32> {
     point(f32::from(p.x - bounds.origin.x), f32::from(p.y - bounds.origin.y))
 }
@@ -660,7 +691,7 @@ fn grid(shell: Entity<Shell>, key: RollKey, frame: GridFrame) -> gpui::Canvas<Hi
                     return;
                 }
                 let pos = local(bounds, e.position);
-                down_shell.update(cx, |sh, cx| sh.roll_mouse_down(&down_key, pos, e.button, e.modifiers, window, cx));
+                down_shell.update(cx, |sh, cx| sh.roll_mouse_down(&down_key, (grid_origin(bounds), pos), e.button, e.modifiers, window, cx));
                 cx.stop_propagation();
             });
             let (move_shell, move_key, move_hitbox) = (shell.clone(), key.clone(), hitbox.clone());
@@ -670,7 +701,7 @@ fn grid(shell: Entity<Shell>, key: RollKey, frame: GridFrame) -> gpui::Canvas<Hi
                 }
                 let hovered = move_hitbox.is_hovered(window);
                 let pos = local(bounds, e.position);
-                move_shell.update(cx, |sh, cx| sh.roll_mouse_move(&move_key, pos, hovered, cx));
+                move_shell.update(cx, |sh, cx| sh.roll_mouse_move(&move_key, grid_origin(bounds), pos, hovered, cx));
             });
             let (up_shell, up_key) = (shell.clone(), key.clone());
             window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
@@ -735,11 +766,15 @@ fn paint_grid(bounds: Bounds<Pixels>, f: &GridFrame, window: &mut Window) {
         tick += SNAP;
     }
 
-    // Past the end of the pattern loop.
-    let end_x = (f.length as f32 - view.scroll_ticks) * view.px_per_tick;
+    // Outside the clip's window (trimmed off or past its end).
+    let start_x = (f.window.0 as f32 - view.scroll_ticks) * view.px_per_tick;
+    if start_x > 0.0 {
+        window.paint_quad(fill(rect(bounds, 0.0, 0.0, start_x.min(width), height), outside_window()));
+    }
+    let end_x = (f.window.1 as f32 - view.scroll_ticks) * view.px_per_tick;
     if end_x < width {
         let x = end_x.max(0.0);
-        window.paint_quad(fill(rect(bounds, x, 0.0, width - x, height), past_end()));
+        window.paint_quad(fill(rect(bounds, x, 0.0, width - x, height), outside_window()));
     }
 
     // Notes: a dark edge, then the body.
@@ -838,7 +873,7 @@ pub fn render_velocity_lane(shell: &Shell, state: &AppState, key: &RollKey, cx: 
         .into_any_element()
 }
 
-/// Piano roll state per open roll tab.
+/// Piano roll state per clip open under a timeline.
 pub type Rolls = HashMap<RollKey, RollState>;
 
 #[cfg(test)]
@@ -847,6 +882,13 @@ mod tests {
 
     fn n(pitch: u8, start: Tick) -> Note {
         Note { pitch, start, length: 240, velocity: 100 }
+    }
+
+    #[test]
+    fn swapped_removes_one_instance_each_and_adds() {
+        let notes = vec![n(60, 0), n(60, 0), n(62, 240)];
+        assert_eq!(swapped(&notes, &[n(60, 0)], &[n(64, 480)]), vec![n(60, 0), n(62, 240), n(64, 480)]);
+        assert_eq!(swapped(&notes, &[n(70, 0)], &[]), notes, "unknown notes are ignored");
     }
 
     #[test]

@@ -1,11 +1,12 @@
-use crate::model::{InstrumentId, PatternId, Project};
+use crate::model::{AudioLaneId, InstrumentId, PatternId, Project};
+use std::path::Path;
 
 /// Smallest N >= 1 such that `pattern-N` is unused.
 pub fn next_pattern(project: &Project) -> (PatternId, String) {
     let n = (1u32..)
         .find(|n| project.pattern(&PatternId(format!("pattern-{n}"))).is_none())
         .expect("pattern numbers exhausted");
-    (PatternId(format!("pattern-{n}")), format!("pattern {n}"))
+    (PatternId(format!("pattern-{n}")), format!("Pattern {n}"))
 }
 
 fn slugify(name: &str) -> String {
@@ -40,4 +41,19 @@ pub fn new_instrument(project: &Project, base_name: &str) -> (InstrumentId, Stri
         .find(|n| project.instrument(&InstrumentId(format!("{slug}-{n}"))).is_none())
         .expect("instrument numbers exhausted");
     (InstrumentId(format!("{slug}-{n}")), format!("{base_name} {n}"))
+}
+
+/// Unique audio lane id from the file's name (`My Tag.wav` → `my-tag`, then `my-tag-2`...).
+pub fn new_audio_lane(project: &Project, path: &Path) -> AudioLaneId {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let slug = match slugify(&stem).as_str() {
+        "instrument" => "audio".to_string(),
+        s => s.to_string(),
+    };
+    let taken = |id: &str| project.song.audio_lanes.iter().any(|l| l.id.0 == id);
+    if !taken(&slug) {
+        return AudioLaneId(slug);
+    }
+    let n = (2u32..).find(|n| !taken(&format!("{slug}-{n}"))).expect("lane numbers exhausted");
+    AudioLaneId(format!("{slug}-{n}"))
 }

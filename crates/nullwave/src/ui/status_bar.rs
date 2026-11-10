@@ -28,7 +28,7 @@ pub fn render(shell: &Shell, cx: &Context<Shell>) -> impl IntoElement {
     let state = shell.state.read(cx);
     let has_project = state.project_dir.is_some();
     let ts = state.project.time_signature;
-    let pattern = state.status_pattern().map(|p| p.name.clone());
+    let pattern = state.status_target_name();
 
     let play = div()
         .id("play-stop")

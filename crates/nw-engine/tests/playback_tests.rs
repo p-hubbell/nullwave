@@ -36,6 +36,7 @@ fn voice_start(sample: Shared<SampleBuffer>, region: PlayRegion, duration: Optio
         // Undo the centre-pan gain so left output equals the sample value.
         params: VoiceParams::simple(std::f32::consts::SQRT_2, 0.0, 0, 0),
         duration_samples: duration,
+        offset: 0.0,
         age: 0,
     }
 }
@@ -137,7 +138,7 @@ fn inst(sample: Shared<SampleBuffer>, region: PlayRegion, one_shot: bool) -> Ins
 fn play_one_note(instrument: InstrumentSnapshot, length: Tick, frames: usize) -> Vec<f32> {
     let c = Collector::new();
     let event = NoteEvent { tick: 0, instrument: 0, pitch: 60, velocity: 127, length };
-    let snapshot = Snapshot { tempo: 120.0, loop_length: 3840 * 4, instruments: vec![instrument], events: vec![event] };
+    let snapshot = Snapshot { tempo: 120.0, length: 3840 * 4, looping: true, instruments: vec![instrument], events: vec![event] };
     let mut core = EngineCore::new(RATE, Owned::new(&c.handle(), snapshot));
     core.handle(Command::Play);
     let mut buf = vec![0.0f32; frames * 2];
@@ -194,7 +195,7 @@ fn process_does_not_allocate_with_loops_and_one_shots() {
     let events = (0..64)
         .map(|i| NoteEvent { tick: (i * 30) as Tick, instrument: i % 4, pitch: 48 + (i % 24) as u8, velocity: 100, length: 400 })
         .collect();
-    let snapshot = Snapshot { tempo: 120.0, loop_length: 3840, instruments, events };
+    let snapshot = Snapshot { tempo: 120.0, length: 3840, looping: true, instruments, events };
     let mut core = EngineCore::new(RATE, Owned::new(&c.handle(), snapshot));
     core.handle(Command::Play);
     core.handle(Command::PreviewNote { instrument: 1, pitch: 60, velocity: 100, length: 2000 });

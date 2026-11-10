@@ -1,0 +1,21 @@
+(
+    tempo: 140.0,
+    time_signature: (
+        numerator: 4,
+        denominator: 4,
+    ),
+    instruments: [
+        "kick",
+        "bell",
+    ],
+    patterns: [
+        (
+            id: "pattern-1",
+            name: "pattern 1",
+        ),
+        (
+            id: "pattern-2",
+            name: "Verse",
+        ),
+    ],
+)

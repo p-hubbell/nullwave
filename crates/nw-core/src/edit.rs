@@ -1,25 +1,41 @@
-use crate::model::{Instrument, InstrumentId, Note, Pattern, PatternId, Project};
+use crate::model::{
+    AudioLane, AudioPlacement, Clip, ClipRef, Container, Instrument, InstrumentId, Pattern, PatternId,
+    PatternPlacement, Placement, Project, Timeline,
+};
 
 /// The unit of dirtiness and of on-disk files.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DocPath {
+    /// `song.ron`: tempo, time signature, instrument and pattern lists.
     Song,
     Instrument(InstrumentId),
-    Notes(PatternId, InstrumentId),
+    /// A pattern's placements.
+    PatternLayout(PatternId),
+    /// The song's placements and audio lanes.
+    Arrangement,
+    /// One clip's notes, length and start.
+    Clip(ClipRef),
 }
+
+/// What an instrument had on one timeline when it was removed.
+pub type RemovedClips = Vec<(Container, Vec<Clip>, Vec<Placement>)>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
-    AddNotes { pattern: PatternId, instrument: InstrumentId, notes: Vec<Note> },
-    RemoveNotes { pattern: PatternId, instrument: InstrumentId, notes: Vec<Note> },
-    /// Move, resize, velocity.
-    ReplaceNotes { pattern: PatternId, instrument: InstrumentId, before: Vec<Note>, after: Vec<Note> },
+    /// Adds (`before: None`), changes, or removes (`after: None`) one clip.
+    ReplaceClip { container: Container, before: Option<Clip>, after: Option<Clip> },
+    ReplacePlacements { container: Container, before: Vec<Placement>, after: Vec<Placement> },
+    ReplacePatternPlacements { before: Vec<PatternPlacement>, after: Vec<PatternPlacement> },
+    ReplaceAudioPlacements { before: Vec<AudioPlacement>, after: Vec<AudioPlacement> },
+    AddAudioLane { lane: AudioLane, index: usize },
+    RemoveAudioLane { lane: AudioLane, index: usize },
+    UpdateAudioLane { before: AudioLane, after: AudioLane },
     // Instruments are boxed: a sampler's settings are large, and every undo step
     // (including note edits) would otherwise be sized for them.
     AddInstrument { instrument: Box<Instrument>, index: usize },
-    RemoveInstrument { instrument: Box<Instrument>, index: usize, notes: Vec<(PatternId, Vec<Note>)> },
-    /// Inverse of `RemoveInstrument`: re-adds the instrument together with its notes.
-    RestoreInstrument { instrument: Box<Instrument>, index: usize, notes: Vec<(PatternId, Vec<Note>)> },
+    RemoveInstrument { instrument: Box<Instrument>, index: usize, removed: RemovedClips },
+    /// Inverse of `RemoveInstrument`: re-adds the instrument with its clips and placements.
+    RestoreInstrument { instrument: Box<Instrument>, index: usize, removed: RemovedClips },
     UpdateInstrument { before: Box<Instrument>, after: Box<Instrument> },
     AddPattern { pattern: Pattern, index: usize },
     RemovePattern { pattern: Pattern, index: usize },
@@ -27,57 +43,88 @@ pub enum Edit {
     SetTempo { before: f64, after: f64 },
 }
 
-fn add_notes(project: &mut Project, pattern: &PatternId, instrument: &InstrumentId, notes: &[Note]) {
-    if notes.is_empty() {
-        return;
-    }
-    if let Some(p) = project.pattern_mut(pattern) {
-        let list = p.notes.entry(instrument.clone()).or_default();
-        list.extend(notes.iter().cloned());
-        list.sort_by_key(|n| (n.start, n.pitch));
-    }
-}
-
-fn remove_notes(project: &mut Project, pattern: &PatternId, instrument: &InstrumentId, notes: &[Note]) {
-    if let Some(p) = project.pattern_mut(pattern) {
-        if let Some(list) = p.notes.get_mut(instrument) {
-            for n in notes {
-                if let Some(i) = list.iter().position(|x| x == n) {
-                    list.remove(i);
-                }
-            }
-            if list.is_empty() {
-                p.notes.remove(instrument);
-            }
+/// Removes one instance per item of `items` (by equality), then inserts `add` and sorts.
+fn replace_sorted<T: PartialEq + Clone, K: Ord>(list: &mut Vec<T>, remove: &[T], add: &[T], key: impl Fn(&T) -> K) {
+    for r in remove {
+        if let Some(i) = list.iter().position(|x| x == r) {
+            list.remove(i);
         }
     }
+    list.extend(add.iter().cloned());
+    list.sort_by_key(key);
 }
 
-fn insert_instrument(project: &mut Project, instrument: &Instrument, index: usize, notes: &[(PatternId, Vec<Note>)]) {
+fn replace_clip(timeline: &mut Timeline, before: &Option<Clip>, after: &Option<Clip>) {
+    if let Some(b) = before {
+        timeline.clips.retain(|c| c.key != b.key);
+    }
+    if let Some(a) = after {
+        timeline.clips.retain(|c| c.key != a.key);
+        let mut a = a.clone();
+        a.notes.sort_by_key(|n| (n.start, n.pitch));
+        timeline.clips.push(a);
+        timeline.clips.sort_by(|x, y| x.key.cmp(&y.key));
+    }
+}
+
+fn replace_placements(timeline: &mut Timeline, before: &[Placement], after: &[Placement]) {
+    replace_sorted(&mut timeline.placements, before, after, |p| (p.at, p.clip.clone()));
+}
+
+fn insert_instrument(project: &mut Project, instrument: &Instrument, index: usize, removed: &RemovedClips) {
     let index = index.min(project.instruments.len());
     project.instruments.insert(index, instrument.clone());
-    for (pattern, list) in notes {
-        add_notes(project, pattern, &instrument.id, list);
+    for (container, clips, placements) in removed {
+        if let Some(t) = project.timeline_mut(container) {
+            for c in clips {
+                replace_clip(t, &None, &Some(c.clone()));
+            }
+            replace_placements(t, &[], placements);
+        }
     }
 }
 
 impl Edit {
     pub fn apply(&self, project: &mut Project) {
         match self {
-            Edit::AddNotes { pattern, instrument, notes } => add_notes(project, pattern, instrument, notes),
-            Edit::RemoveNotes { pattern, instrument, notes } => remove_notes(project, pattern, instrument, notes),
-            Edit::ReplaceNotes { pattern, instrument, before, after } => {
-                remove_notes(project, pattern, instrument, before);
-                add_notes(project, pattern, instrument, after);
+            Edit::ReplaceClip { container, before, after } => {
+                if let Some(t) = project.timeline_mut(container) {
+                    replace_clip(t, before, after);
+                }
             }
-            Edit::AddInstrument { instrument, index } => insert_instrument(project, instrument, *index, &[]),
-            Edit::RestoreInstrument { instrument, index, notes } => {
-                insert_instrument(project, instrument, *index, notes)
+            Edit::ReplacePlacements { container, before, after } => {
+                if let Some(t) = project.timeline_mut(container) {
+                    replace_placements(t, before, after);
+                }
+            }
+            Edit::ReplacePatternPlacements { before, after } => {
+                replace_sorted(&mut project.song.patterns, before, after, |p| (p.at, p.pattern.clone()))
+            }
+            Edit::ReplaceAudioPlacements { before, after } => {
+                replace_sorted(&mut project.song.audio, before, after, |p| (p.at, p.lane.clone()))
+            }
+            Edit::AddAudioLane { lane, index } => {
+                let index = (*index).min(project.song.audio_lanes.len());
+                project.song.audio_lanes.insert(index, lane.clone());
+            }
+            Edit::RemoveAudioLane { lane, .. } => project.song.audio_lanes.retain(|l| l.id != lane.id),
+            Edit::UpdateAudioLane { before, after } => {
+                if let Some(l) = project.song.audio_lanes.iter_mut().find(|l| l.id == before.id) {
+                    *l = after.clone();
+                }
+            }
+            Edit::AddInstrument { instrument, index } => insert_instrument(project, instrument, *index, &Vec::new()),
+            Edit::RestoreInstrument { instrument, index, removed } => {
+                insert_instrument(project, instrument, *index, removed)
             }
             Edit::RemoveInstrument { instrument, .. } => {
                 project.instruments.retain(|i| i.id != instrument.id);
-                for p in &mut project.patterns {
-                    p.notes.remove(&instrument.id);
+                let id = &instrument.id;
+                let timelines =
+                    project.patterns.iter_mut().map(|p| &mut p.timeline).chain([&mut project.song.timeline]);
+                for t in timelines {
+                    t.clips.retain(|c| &c.key.instrument != id);
+                    t.placements.retain(|p| &p.clip.instrument != id);
                 }
             }
             Edit::UpdateInstrument { before, after } => {
@@ -101,19 +148,25 @@ impl Edit {
 
     pub fn inverse(&self) -> Edit {
         match self.clone() {
-            Edit::AddNotes { pattern, instrument, notes } => Edit::RemoveNotes { pattern, instrument, notes },
-            Edit::RemoveNotes { pattern, instrument, notes } => Edit::AddNotes { pattern, instrument, notes },
-            Edit::ReplaceNotes { pattern, instrument, before, after } => {
-                Edit::ReplaceNotes { pattern, instrument, before: after, after: before }
+            Edit::ReplaceClip { container, before, after } => Edit::ReplaceClip { container, before: after, after: before },
+            Edit::ReplacePlacements { container, before, after } => {
+                Edit::ReplacePlacements { container, before: after, after: before }
             }
+            Edit::ReplacePatternPlacements { before, after } => {
+                Edit::ReplacePatternPlacements { before: after, after: before }
+            }
+            Edit::ReplaceAudioPlacements { before, after } => Edit::ReplaceAudioPlacements { before: after, after: before },
+            Edit::AddAudioLane { lane, index } => Edit::RemoveAudioLane { lane, index },
+            Edit::RemoveAudioLane { lane, index } => Edit::AddAudioLane { lane, index },
+            Edit::UpdateAudioLane { before, after } => Edit::UpdateAudioLane { before: after, after: before },
             Edit::AddInstrument { instrument, index } => {
-                Edit::RemoveInstrument { instrument, index, notes: Vec::new() }
+                Edit::RemoveInstrument { instrument, index, removed: Vec::new() }
             }
-            Edit::RemoveInstrument { instrument, index, notes } => {
-                Edit::RestoreInstrument { instrument, index, notes }
+            Edit::RemoveInstrument { instrument, index, removed } => {
+                Edit::RestoreInstrument { instrument, index, removed }
             }
-            Edit::RestoreInstrument { instrument, index, notes } => {
-                Edit::RemoveInstrument { instrument, index, notes }
+            Edit::RestoreInstrument { instrument, index, removed } => {
+                Edit::RemoveInstrument { instrument, index, removed }
             }
             Edit::UpdateInstrument { before, after } => Edit::UpdateInstrument { before: after, after: before },
             Edit::AddPattern { pattern, index } => Edit::RemovePattern { pattern, index },
@@ -125,32 +178,49 @@ impl Edit {
 
     /// Documents this edit changes; `Song` first, then others in deterministic order.
     pub fn touched(&self) -> Vec<DocPath> {
+        let layout = |c: &Container| match c {
+            Container::Pattern(p) => DocPath::PatternLayout(p.clone()),
+            Container::Song => DocPath::Arrangement,
+        };
+        let clip_doc = |c: &Container, clip: &Clip| {
+            DocPath::Clip(ClipRef { container: c.clone(), key: clip.key.clone() })
+        };
         match self {
-            Edit::AddNotes { pattern, instrument, .. }
-            | Edit::RemoveNotes { pattern, instrument, .. }
-            | Edit::ReplaceNotes { pattern, instrument, .. } => {
-                vec![DocPath::Notes(pattern.clone(), instrument.clone())]
+            Edit::ReplaceClip { container, before, after } => {
+                let mut v: Vec<DocPath> =
+                    before.iter().chain(after.iter()).map(|c| clip_doc(container, c)).collect();
+                v.dedup();
+                v
             }
+            Edit::ReplacePlacements { container, .. } => vec![layout(container)],
+            Edit::ReplacePatternPlacements { .. }
+            | Edit::ReplaceAudioPlacements { .. }
+            | Edit::AddAudioLane { .. }
+            | Edit::RemoveAudioLane { .. }
+            | Edit::UpdateAudioLane { .. } => vec![DocPath::Arrangement],
             Edit::AddInstrument { instrument, .. } => {
                 vec![DocPath::Song, DocPath::Instrument(instrument.id.clone())]
             }
-            Edit::RemoveInstrument { instrument, notes, .. }
-            | Edit::RestoreInstrument { instrument, notes, .. } => {
+            Edit::RemoveInstrument { instrument, removed, .. }
+            | Edit::RestoreInstrument { instrument, removed, .. } => {
                 let mut v = vec![DocPath::Song, DocPath::Instrument(instrument.id.clone())];
-                v.extend(
-                    notes
-                        .iter()
-                        .filter(|(_, n)| !n.is_empty())
-                        .map(|(p, _)| DocPath::Notes(p.clone(), instrument.id.clone())),
-                );
+                let mut rest: Vec<DocPath> = Vec::new();
+                for (container, clips, placements) in removed {
+                    if !placements.is_empty() {
+                        rest.push(layout(container));
+                    }
+                    rest.extend(clips.iter().map(|c| clip_doc(container, c)));
+                }
+                rest.sort();
+                rest.dedup();
+                v.extend(rest);
                 v
             }
             Edit::UpdateInstrument { before, .. } => vec![DocPath::Instrument(before.id.clone())],
             Edit::AddPattern { pattern, .. } | Edit::RemovePattern { pattern, .. } => {
-                let mut v = vec![DocPath::Song];
-                v.extend(pattern.notes.iter().filter(|(_, n)| !n.is_empty()).map(|(i, _)| {
-                    DocPath::Notes(pattern.id.clone(), i.clone())
-                }));
+                let container = Container::Pattern(pattern.id.clone());
+                let mut v = vec![DocPath::Song, DocPath::PatternLayout(pattern.id.clone())];
+                v.extend(pattern.timeline.clips.iter().map(|c| clip_doc(&container, c)));
                 v
             }
             Edit::RenamePattern { .. } | Edit::SetTempo { .. } => vec![DocPath::Song],
@@ -158,13 +228,20 @@ impl Edit {
     }
 }
 
-/// Builds a `RemoveInstrument` capturing the instrument's notes in every pattern.
+/// Builds a `RemoveInstrument` capturing the instrument's clips and placements in every
+/// pattern and the song.
 pub fn remove_instrument_edit(project: &Project, id: &InstrumentId) -> Option<Edit> {
     let index = project.instrument_index(id)?;
-    let notes = project
-        .patterns
-        .iter()
-        .filter_map(|p| p.notes.get(id).filter(|n| !n.is_empty()).map(|n| (p.id.clone(), n.clone())))
+    let containers =
+        project.patterns.iter().map(|p| Container::Pattern(p.id.clone())).chain([Container::Song]);
+    let removed = containers
+        .filter_map(|c| {
+            let t = project.timeline(&c)?;
+            let clips: Vec<Clip> = t.clips.iter().filter(|x| &x.key.instrument == id).cloned().collect();
+            let placements: Vec<Placement> =
+                t.placements.iter().filter(|x| &x.clip.instrument == id).cloned().collect();
+            (!clips.is_empty() || !placements.is_empty()).then_some((c, clips, placements))
+        })
         .collect();
-    Some(Edit::RemoveInstrument { instrument: Box::new(project.instruments[index].clone()), index, notes })
+    Some(Edit::RemoveInstrument { instrument: Box::new(project.instruments[index].clone()), index, removed })
 }

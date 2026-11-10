@@ -12,7 +12,8 @@ use nw_workspace::{
 use crate::app_state::AppState;
 use crate::theme;
 use crate::ui::components::{dim_line, list_row, section_header};
-use crate::ui::pattern_tab::{SampleDrag, SampleDragView};
+use crate::ui::components::Tooltip;
+use crate::ui::drag::{PatternDrag, PatternDragView, SampleDrag, SampleDragView};
 use crate::ui::shell::Shell;
 
 const MAX_SEARCH_RESULTS: usize = 200;
@@ -151,8 +152,16 @@ fn project_section(shell: &Shell, state: &AppState, cx: &Context<Shell>, rows: &
     };
     let name = dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into());
     rows.push(section_header(format!("project · {name}")).into_any_element());
-    rows.push(dim_line("patterns", 0).text_color(theme::text_muted()).into_any_element());
     let active = state.workspace.active_tab().cloned();
+    let song_state = shell.state.clone();
+    rows.push(
+        list_row("song", 0, active.as_ref() == Some(&TabKind::Song))
+            .on_click(move |_, _, cx| song_state.update(cx, |s, cx| s.open_tab(TabKind::Song, cx)))
+            .child(div().w(px(12.)).text_color(theme::text_muted()).child("♫"))
+            .child("Song")
+            .into_any_element(),
+    );
+    rows.push(dim_line("patterns", 0).text_color(theme::text_muted()).into_any_element());
     for pattern in &state.project.patterns {
         let tab = TabKind::Pattern(pattern.id.clone());
         let selected = active.as_ref() == Some(&tab);
@@ -162,6 +171,9 @@ fn project_section(shell: &Shell, state: &AppState, cx: &Context<Shell>, rows: &
             continue;
         }
         let id = pattern.id.clone();
+        let drag = PatternDrag { id: pattern.id.clone(), name: pattern.name.clone().into() };
+        let dup_state = shell.state.clone();
+        let dup_id = pattern.id.clone();
         rows.push(
             list_row(row_id, 1, selected)
                 .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, window, cx| {
@@ -171,7 +183,22 @@ fn project_section(shell: &Shell, state: &AppState, cx: &Context<Shell>, rows: &
                         shell.begin_pattern_rename(id.clone(), window, cx);
                     }
                 }))
-                .child(pattern.name.clone())
+                .on_drag(drag, |drag, grab, _, cx| cx.new(|_| PatternDragView::new(drag, grab)))
+                .child(div().flex_1().overflow_hidden().child(pattern.name.clone()))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("dup:{}", pattern.id.0)))
+                        .px(px(4.))
+                        .rounded(px(3.))
+                        .text_color(theme::text_faint())
+                        .hover(|s| s.bg(theme::hover_bg()).text_color(theme::text_strong()))
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            dup_state.update(cx, |s, cx| s.duplicate_pattern(&dup_id, cx));
+                        })
+                        .tooltip(Tooltip::text("Duplicate Pattern"))
+                        .child("⧉"),
+                )
                 .into_any_element(),
         );
     }

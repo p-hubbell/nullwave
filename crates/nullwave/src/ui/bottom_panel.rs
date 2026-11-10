@@ -1,5 +1,5 @@
-//! Bottom panel with the tabs *Editor* (follows the active editor: the velocity lane for a
-//! piano roll) and *Log*.
+//! Bottom panel with the tabs *Editor* (follows the active editor: the velocity lane of the
+//! clip open under a pattern or song timeline) and *Log*.
 
 use gpui::{Context, div, prelude::*, px};
 use nw_workspace::{PanelTab, TabKind};
@@ -13,7 +13,9 @@ pub fn render(shell: &Shell, height: f32, cx: &Context<Shell>) -> impl IntoEleme
     let state = shell.state.read(cx);
     let current = state.workspace.panel_tab;
     let active_roll = match state.workspace.active_tab() {
-        Some(TabKind::PianoRoll(p, i)) => Some((p.clone(), i.clone())),
+        Some(tab @ (TabKind::Pattern(_) | TabKind::Song)) => {
+            state.workspace.timeline(tab).open_clip.filter(|r| shell.rolls.contains_key(r))
+        }
         _ => None,
     };
     let tab = |tab: PanelTab, label: &str, id: &'static str| {

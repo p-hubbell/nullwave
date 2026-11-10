@@ -18,6 +18,7 @@ fn start(sample: Shared<SampleBuffer>) -> VoiceStart {
         rate: 1.0,
         params: VoiceParams::simple(0.5, 0.0, 0, 0),
         duration_samples: None,
+        offset: 0.0,
         age: 7,
     }
 }

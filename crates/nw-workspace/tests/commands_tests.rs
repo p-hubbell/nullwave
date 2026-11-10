@@ -77,3 +77,16 @@ fn empty_query_keeps_order() {
     let entries = vec![entry("b"), entry("a"), entry("c")];
     assert_eq!(rank("", &entries), vec![0, 1, 2]);
 }
+
+#[test]
+fn timeline_commands_exist_and_bind_in_context() {
+    for id in ["project.open_song", "pattern.duplicate", "timeline.duplicate", "timeline.delete", "timeline.make_unique", "timeline.close_roll"] {
+        assert!(COMMANDS.iter().any(|c| c.id == id), "{id}");
+    }
+    let bound = |keys: &str, ctx: &str| {
+        default_bindings().into_iter().find(|b| b.keystrokes == keys && b.context.as_deref() == Some(ctx)).map(|b| b.command)
+    };
+    assert_eq!(bound("cmd-d", "Timeline").as_deref(), Some("timeline.duplicate"));
+    assert_eq!(bound("backspace", "Timeline").as_deref(), Some("timeline.delete"));
+    assert_eq!(bound("escape", "Timeline").as_deref(), Some("timeline.close_roll"));
+}

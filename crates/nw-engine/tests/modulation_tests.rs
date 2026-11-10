@@ -43,7 +43,7 @@ fn inst(sample: Shared<SampleBuffer>) -> InstrumentSnapshot {
 fn play(instrument: InstrumentSnapshot, velocity: u8, length: Tick, frames: usize) -> (Vec<f32>, Vec<f32>) {
     let c = Collector::new();
     let event = NoteEvent { tick: 0, instrument: 0, pitch: 60, velocity, length };
-    let snapshot = Snapshot { tempo: 120.0, loop_length: 3840 * 16, instruments: vec![instrument], events: vec![event] };
+    let snapshot = Snapshot { tempo: 120.0, length: 3840 * 16, looping: true, instruments: vec![instrument], events: vec![event] };
     let mut core = EngineCore::new(RATE, Owned::new(&c.handle(), snapshot));
     core.handle(Command::Play);
     let mut buf = vec![0.0f32; frames * 2];
@@ -218,7 +218,7 @@ fn process_does_not_allocate_with_all_modulation_on() {
     let events = (0..64)
         .map(|n| NoteEvent { tick: (n * 40) as Tick, instrument: n % 4, pitch: 40 + (n % 30) as u8, velocity: 1 + (n * 2) as u8, length: 300 })
         .collect();
-    let snapshot = Snapshot { tempo: 133.0, loop_length: 3840, instruments, events };
+    let snapshot = Snapshot { tempo: 133.0, length: 3840, looping: true, instruments, events };
     let mut core = EngineCore::new(RATE, Owned::new(&c.handle(), snapshot));
     core.handle(Command::Play);
     core.handle(Command::PreviewNote { instrument: 2, pitch: 60, velocity: 90, length: 900 });
@@ -255,7 +255,7 @@ fn full_load_block_time() {
     let events = (0..MAX_VOICES)
         .map(|n| NoteEvent { tick: 0, instrument: 0, pitch: 36 + n as u8, velocity: 100, length: 3840 * 8 })
         .collect();
-    let snapshot = Snapshot { tempo: 120.0, loop_length: 3840 * 16, instruments: vec![i], events };
+    let snapshot = Snapshot { tempo: 120.0, length: 3840 * 16, looping: true, instruments: vec![i], events };
     let mut core = EngineCore::new(RATE, Owned::new(&c.handle(), snapshot));
     core.handle(Command::Play);
     let mut buf = vec![0.0f32; 512 * 2];

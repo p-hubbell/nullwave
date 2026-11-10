@@ -2,7 +2,7 @@
 //! dirty tracking, workspace layout, settings and the audio engine together.
 //! Views read it and call its methods; it notifies them on every change.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -10,10 +10,10 @@ use std::time::Duration;
 use basedrop::{Collector, Owned, Shared};
 use gpui::{Context, PathPromptOptions, Subscription, Task};
 use nw_core::{
-    DocPath, Edit, History, Instrument, InstrumentId, Pattern, PatternId, Project,
-    ProjectWatcher, Tick, clear_recovery, external_changes, hash_bytes, load_project,
-    new_instrument, next_pattern, read_recovery, remove_instrument_edit, save_project,
-    write_recovery,
+    AudioLaneId, ClipRef, Container, DocPath, Edit, History, Instrument, InstrumentId, PPQ, Pattern, PatternId,
+    PlayTarget, Project, ProjectWatcher, Tick, Timeline, add_audio, clear_recovery, delete_pattern,
+    duplicate_pattern, external_changes, hash_bytes, load_project, new_instrument, next_pattern, read_recovery,
+    remove_instrument_edit, save_project, write_recovery,
 };
 use nw_engine::core::{Command, Feedback};
 use nw_engine::handle::EngineHandle;
@@ -69,8 +69,13 @@ pub struct AppState {
     pub log: Vec<String>,
     /// Content hash of every project file as last read or written, keyed by canonical path.
     pub last_saved: HashMap<PathBuf, u64>,
-    /// The pattern `play_stop` last started; played when the focused tab is not a pattern.
-    pub last_played_pattern: Option<PatternId>,
+    /// What `play_stop` last started; played when the focused tab is neither a pattern
+    /// nor the song.
+    pub last_played: Option<PlayTarget>,
+    /// Where the song plays from (moved by clicking the song's ruler).
+    pub song_playhead: Tick,
+    /// Length in ticks of each audio lane's file at the current tempo (absent if missing).
+    pub audio_ticks: HashMap<AudioLaneId, Tick>,
     settings_path: PathBuf,
     /// Owns sample memory when there is no engine (and so no engine collector).
     fallback_collector: Option<Collector>,
@@ -164,7 +169,9 @@ impl AppState {
             cpu_load: 0.0,
             log: Vec::new(),
             last_saved: HashMap::new(),
-            last_played_pattern: None,
+            last_played: None,
+            song_playhead: 0,
+            audio_ticks: HashMap::new(),
             settings_path,
             fallback_collector,
             reported_sample_errors: HashSet::new(),
@@ -219,7 +226,8 @@ impl AppState {
         self.project = project;
         self.history.clear();
         self.dirty.clear();
-        self.last_played_pattern = None;
+        self.last_played = None;
+        self.song_playhead = 0;
         self.log(format!("Opened project {}", dir.display()));
         for w in warnings {
             self.log(format!("Warning: {w:?}"));
@@ -406,7 +414,7 @@ impl AppState {
         }
         let mut project = Project::default();
         let (id, name) = next_pattern(&project);
-        project.patterns.push(Pattern { id, name, notes: BTreeMap::new() });
+        project.patterns.push(Pattern { id, name, timeline: Timeline::default() });
         if let Err(e) = save_project(dir, &project) {
             self.modals.push_back(Modal::error("Could not create project", e.to_string()));
             cx.notify();
@@ -505,11 +513,7 @@ impl AppState {
         if self.workspace != before {
             self.workspace_changed(cx);
         }
-        if let Some(p) = &self.last_played_pattern
-            && self.project.pattern(p).is_none()
-        {
-            self.last_played_pattern = None;
-        }
+        self.forget_deleted_target();
         self.resync_engine();
         cx.notify();
     }
@@ -541,10 +545,7 @@ impl AppState {
         if self.workspace != before {
             self.workspace_changed(cx);
         }
-        if let Some(p) = &self.last_played_pattern
-            && self.project.pattern(p).is_none() {
-                self.last_played_pattern = None;
-            }
+        self.forget_deleted_target();
         self.resync_engine();
         cx.notify();
     }
@@ -576,6 +577,15 @@ impl AppState {
         }
     }
 
+    /// Drops the remembered play target if its pattern is gone.
+    fn forget_deleted_target(&mut self) {
+        if let Some(PlayTarget::Pattern(p)) = &self.last_played
+            && self.project.pattern(p).is_none()
+        {
+            self.last_played = None;
+        }
+    }
+
     pub fn play_stop(&mut self, cx: &mut Context<Self>) {
         if self.engine.is_none() {
             self.log("Can't play: no audio output");
@@ -583,35 +593,70 @@ impl AppState {
             return;
         }
         if self.playing {
-            self.send(Command::Stop);
-            self.playing = false;
-            self.playhead = 0;
+            self.stop_playback();
         } else {
-            let pattern = self.workspace.active_pattern().or_else(|| self.last_played_pattern.clone());
-            if pattern.is_none() {
-                self.log("Nothing to play: open a pattern first");
+            let target = self.workspace.play_target().or_else(|| self.last_played.clone());
+            let Some(target) = target else {
+                self.log("Nothing to play: open a pattern or the song first");
                 cx.notify();
                 return;
-            }
-            self.last_played_pattern = pattern;
+            };
+            let from = match target {
+                PlayTarget::Song => self.song_playhead,
+                PlayTarget::Pattern(_) => 0,
+            };
+            self.last_played = Some(target);
             self.recheck_samples();
             self.playing = true;
             self.resync_engine();
+            self.send(Command::Seek(from));
             self.send(Command::Play);
+            self.playhead = from;
+        }
+        cx.notify();
+    }
+
+    fn stop_playback(&mut self) {
+        self.send(Command::Stop);
+        self.playing = false;
+        self.playhead = 0;
+    }
+
+    /// Moves the song's playhead; while the song plays, playback jumps there.
+    pub fn set_song_playhead(&mut self, tick: Tick, cx: &mut Context<Self>) {
+        self.song_playhead = tick;
+        if self.playing && self.last_played == Some(PlayTarget::Song) {
+            self.send(Command::Seek(tick));
+            self.playhead = tick;
         }
         cx.notify();
     }
 
     /// Rebuilds the engine snapshot from the project and sends it.
     pub fn resync_engine(&mut self) {
-        let pattern = self.snapshot_pattern();
-        let snapshot = compile_snapshot(&self.project, pattern.as_ref(), &mut self.samples);
+        let target = self.snapshot_target();
+        let snapshot = compile_snapshot(&self.project, target.as_ref(), &mut self.samples);
         self.processed = self
             .project
             .instruments
             .iter()
             .zip(&snapshot.instruments)
             .filter_map(|(inst, snap)| snap.sample.clone().map(|b| (inst.id.clone(), b)))
+            .collect();
+        let first_audio = self.project.instruments.len();
+        let tempo = if self.project.tempo > 0.0 { self.project.tempo } else { 120.0 };
+        self.audio_ticks = self
+            .project
+            .song
+            .audio_lanes
+            .iter()
+            .zip(&snapshot.instruments[first_audio.min(snapshot.instruments.len())..])
+            .filter_map(|(lane, snap)| {
+                let sample = snap.sample.as_ref()?;
+                let frames = snap.region.end.saturating_sub(snap.region.start) as f64;
+                let seconds = frames / f64::from(sample.sample_rate.max(1));
+                Some((lane.id.clone(), ((seconds * tempo / 60.0 * f64::from(PPQ)).ceil() as Tick).max(1)))
+            })
             .collect();
         self.peaks_stale = true;
         self.report_sample_errors();
@@ -621,18 +666,36 @@ impl AppState {
         }
     }
 
-    /// The pattern the engine should hold: the playing one, else the one Play would start.
-    fn snapshot_pattern(&self) -> Option<PatternId> {
+    /// What the engine should hold: the playing target, else the one Play would start.
+    fn snapshot_target(&self) -> Option<PlayTarget> {
         if self.playing {
-            self.last_played_pattern.clone()
+            self.last_played.clone()
         } else {
-            self.workspace.active_pattern().or_else(|| self.last_played_pattern.clone())
+            self.workspace.play_target().or_else(|| self.last_played.clone())
         }
     }
 
-    /// The pattern shown in the status bar.
-    pub fn status_pattern(&self) -> Option<&Pattern> {
-        self.snapshot_pattern().and_then(|id| self.project.pattern(&id))
+    /// The name shown in the status bar: "Song" or the pattern's name.
+    pub fn status_target_name(&self) -> Option<String> {
+        match self.snapshot_target()? {
+            PlayTarget::Song => Some("Song".to_string()),
+            PlayTarget::Pattern(id) => self.project.pattern(&id).map(|p| p.name.clone()),
+        }
+    }
+
+    /// Length of an audio lane's clip in ticks for drawing: the file's length, or one bar
+    /// when the file is missing.
+    pub fn audio_length(&self, lane: &AudioLaneId) -> Tick {
+        self.audio_ticks.get(lane).copied().unwrap_or_else(|| self.project.time_signature.ticks_per_bar())
+    }
+
+    /// Opens `clip` in the piano roll under `tab`'s timeline.
+    pub fn open_clip(&mut self, tab: &TabKind, clip: Option<ClipRef>, cx: &mut Context<Self>) {
+        let mut state = self.workspace.timeline(tab);
+        if state.open_clip != clip {
+            state.open_clip = clip;
+            self.update_workspace(cx, |ws| ws.set_timeline(state));
+        }
     }
 
     fn send(&mut self, command: Command) {
@@ -645,8 +708,9 @@ impl AppState {
     /// Before playback starts, retry failed samples (a drive may be back) and drop cached
     /// samples whose file has gone (renamed or unplugged), so playback matches the disk.
     fn recheck_samples(&mut self) {
-        for inst in &self.project.instruments {
-            let Some(path) = &inst.sampler.sample_path else { continue };
+        let instruments = self.project.instruments.iter().filter_map(|i| i.sampler.sample_path.as_ref());
+        let audio = self.project.song.audio_lanes.iter().map(|l| &l.path);
+        for path in instruments.chain(audio) {
             match self.samples.status(path) {
                 Some(Ok(())) if !path.exists() => self.samples.invalidate(path),
                 Some(Err(_)) => self.samples.invalidate(path),
@@ -657,12 +721,14 @@ impl AppState {
 
     fn report_sample_errors(&mut self) {
         let mut lines = Vec::new();
-        for inst in &self.project.instruments {
-            let Some(path) = &inst.sampler.sample_path else { continue };
+        let instruments =
+            self.project.instruments.iter().filter_map(|i| Some((format!("Instrument \"{}\"", i.name), i.sampler.sample_path.as_ref()?)));
+        let audio = self.project.song.audio_lanes.iter().map(|l| (format!("Audio lane \"{}\"", l.id.0), &l.path));
+        for (what, path) in instruments.chain(audio) {
             match self.samples.status(path) {
                 Some(Err(e)) => {
                     if self.reported_sample_errors.insert(path.clone()) {
-                        lines.push(format!("Instrument \"{}\" is silent: {e}", inst.name));
+                        lines.push(format!("{what} is silent: {e}"));
                     }
                 }
                 Some(Ok(())) => {
@@ -673,6 +739,15 @@ impl AppState {
         }
         for line in lines {
             self.log(line);
+        }
+    }
+
+    /// Why an audio lane is silent, if its file failed to load.
+    pub fn audio_missing(&self, lane: &AudioLaneId) -> Option<String> {
+        let lane = self.project.song.audio_lanes.iter().find(|l| &l.id == lane)?;
+        match self.samples.status(&lane.path) {
+            Some(Err(e)) => Some(e.to_string()),
+            _ => None,
         }
     }
 
@@ -776,7 +851,7 @@ impl AppState {
             return None;
         }
         let (id, name) = next_pattern(&self.project);
-        let pattern = Pattern { id: id.clone(), name, notes: BTreeMap::new() };
+        let pattern = Pattern { id: id.clone(), name, timeline: Timeline::default() };
         let index = self.project.patterns.len();
         self.apply(vec![Edit::AddPattern { pattern, index }], cx);
         self.open_tab(TabKind::Pattern(id.clone()), cx);
@@ -857,16 +932,30 @@ impl AppState {
         self.apply(vec![Edit::RenamePattern { id: id.clone(), before, after }], cx);
     }
 
-    /// Removes the pattern; its tabs close. Undo restores it.
+    /// Removes the pattern and its places in the song; its tabs close. Undo restores it.
     pub fn delete_pattern(&mut self, id: &PatternId, cx: &mut Context<Self>) {
-        let Some(index) = self.project.patterns.iter().position(|p| &p.id == id) else { return };
-        let pattern = self.project.patterns[index].clone();
-        if self.playing && self.last_played_pattern.as_ref() == Some(id) {
-            self.send(Command::Stop);
-            self.playing = false;
-            self.playhead = 0;
+        if self.playing && self.last_played == Some(PlayTarget::Pattern(id.clone())) {
+            self.stop_playback();
         }
-        self.apply(vec![Edit::RemovePattern { pattern, index }], cx);
+        let edits = delete_pattern(&self.project, id);
+        self.apply(edits, cx);
+    }
+
+    /// Copies the pattern as "Pattern N" and opens the copy.
+    pub fn duplicate_pattern(&mut self, id: &PatternId, cx: &mut Context<Self>) {
+        let (edits, copy) = duplicate_pattern(&self.project, id);
+        if edits.is_empty() {
+            return;
+        }
+        self.apply(edits, cx);
+        self.open_tab(TabKind::Pattern(copy), cx);
+    }
+
+    /// Places the audio file in the song at `at` (on its own lane).
+    pub fn add_audio_clip(&mut self, path: PathBuf, at: Tick, cx: &mut Context<Self>) {
+        self.samples.invalidate(&path);
+        let edits = add_audio(&self.project, &path, at);
+        self.apply(edits, cx);
     }
 
     /// Asks for audio files with the native picker and adds a sampler for each.
@@ -1022,13 +1111,19 @@ fn record_gitignore(dir: &Path, hashes: &mut HashMap<PathBuf, u64>) {
     }
 }
 
-/// Every document the project has on disk: the song, each instrument and each note file.
+/// Every document the project has on disk: the song file, instruments, pattern layouts,
+/// the arrangement and every clip.
 fn project_docs(project: &Project) -> Vec<DocPath> {
-    let mut docs = vec![DocPath::Song];
+    let mut docs = vec![DocPath::Song, DocPath::Arrangement];
     docs.extend(project.instruments.iter().map(|i| DocPath::Instrument(i.id.clone())));
+    let clips = |c: Container, t: &Timeline| {
+        t.clips.iter().map(move |clip| DocPath::Clip(ClipRef { container: c.clone(), key: clip.key.clone() })).collect::<Vec<_>>()
+    };
     for p in &project.patterns {
-        docs.extend(p.notes.iter().filter(|(_, n)| !n.is_empty()).map(|(i, _)| DocPath::Notes(p.id.clone(), i.clone())));
+        docs.push(DocPath::PatternLayout(p.id.clone()));
+        docs.extend(clips(Container::Pattern(p.id.clone()), &p.timeline));
     }
+    docs.extend(clips(Container::Song, &project.song.timeline));
     docs
 }
 

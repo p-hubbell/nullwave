@@ -1,0 +1,22 @@
+(
+    notes: [
+        (
+            pitch: 36,
+            start: 0,
+            length: 240,
+            velocity: 100,
+        ),
+        (
+            pitch: 36,
+            start: 1920,
+            length: 240,
+            velocity: 100,
+        ),
+        (
+            pitch: 36,
+            start: 3840,
+            length: 240,
+            velocity: 100,
+        ),
+    ],
+)

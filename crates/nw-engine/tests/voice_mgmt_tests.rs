@@ -38,7 +38,7 @@ fn note(tick: Tick, instrument: usize, pitch: u8, length: Tick) -> NoteEvent {
 
 fn core_with(c: &Collector, instruments: Vec<InstrumentSnapshot>, mut events: Vec<NoteEvent>) -> EngineCore {
     events.sort_by_key(|e| e.tick);
-    let snapshot = Snapshot { tempo: 120.0, loop_length: 3840 * 16, instruments, events };
+    let snapshot = Snapshot { tempo: 120.0, length: 3840 * 16, looping: true, instruments, events };
     let mut core = EngineCore::new(RATE, Owned::new(&c.handle(), snapshot));
     core.handle(Command::Play);
     core

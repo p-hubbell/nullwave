@@ -1,7 +1,7 @@
 use crate::sampler::Sampler;
 use crate::time::{Tick, TimeSignature};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 pub const DEFAULT_VELOCITY: u8 = 100;
 
@@ -43,12 +43,138 @@ impl Instrument {
     }
 }
 
+/// Clip numbers count per instrument within one timeline, starting at 1.
+pub type ClipNumber = u32;
+
+/// Where a clip lives: inside one pattern, or loose in the song.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Container {
+    Pattern(PatternId),
+    Song,
+}
+
+/// A clip within its timeline: the instrument plus the number shown on its blocks.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ClipKey {
+    pub instrument: InstrumentId,
+    pub number: ClipNumber,
+}
+
+/// A clip anywhere in the project.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ClipRef {
+    pub container: Container,
+    pub key: ClipKey,
+}
+
+/// A run of notes for one instrument. Notes are in clip-local ticks, sorted by
+/// `(start, pitch)`; only the window `[start, start + length)` is heard.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Clip {
+    pub key: ClipKey,
+    pub start: Tick,
+    pub length: Tick,
+    pub notes: Vec<Note>,
+}
+
+/// One block of a clip on a timeline; `at` is where the clip's window starts sounding.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Placement {
+    pub clip: ClipKey,
+    pub at: Tick,
+}
+
+/// Clips and where they are placed. Every clip has at least one placement.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct Timeline {
+    /// Sorted by key.
+    pub clips: Vec<Clip>,
+    /// Sorted by `(at, clip)`.
+    pub placements: Vec<Placement>,
+}
+
+impl Timeline {
+    pub fn clip(&self, key: &ClipKey) -> Option<&Clip> {
+        self.clips.iter().find(|c| &c.key == key)
+    }
+
+    pub fn clip_mut(&mut self, key: &ClipKey) -> Option<&mut Clip> {
+        self.clips.iter_mut().find(|c| &c.key == key)
+    }
+
+    /// How many blocks show this clip.
+    pub fn uses(&self, key: &ClipKey) -> usize {
+        self.placements.iter().filter(|p| &p.clip == key).count()
+    }
+
+    /// One above the highest number this instrument uses here (1 if none).
+    pub fn next_number(&self, instrument: &InstrumentId) -> ClipNumber {
+        let in_clips = self.clips.iter().map(|c| &c.key);
+        let in_placements = self.placements.iter().map(|p| &p.clip);
+        in_clips.chain(in_placements).filter(|k| &k.instrument == instrument).map(|k| k.number).max().unwrap_or(0)
+            + 1
+    }
+
+    /// End of the last placed block (0 if empty).
+    pub fn end(&self) -> Tick {
+        self.placements
+            .iter()
+            .filter_map(|p| self.clip(&p.clip).map(|c| p.at + c.length))
+            .max()
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pattern {
     pub id: PatternId,
     pub name: String,
-    /// Per-instrument note lists, kept sorted by `(start, pitch)`.
-    pub notes: BTreeMap<InstrumentId, Vec<Note>>,
+    pub timeline: Timeline,
+}
+
+/// A pattern placed in the song.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PatternPlacement {
+    pub pattern: PatternId,
+    pub at: Tick,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AudioLaneId(pub String);
+
+/// A lane in the song for one audio file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioLane {
+    pub id: AudioLaneId,
+    pub path: PathBuf,
+    /// Range 0.0..=1.0.
+    pub volume: f32,
+}
+
+/// The lane's file, played from its start at `at`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AudioPlacement {
+    pub lane: AudioLaneId,
+    pub at: Tick,
+}
+
+/// The whole track: loose clips, placed patterns and audio.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct Song {
+    pub timeline: Timeline,
+    /// Sorted by `(at, pattern)`.
+    pub patterns: Vec<PatternPlacement>,
+    pub audio_lanes: Vec<AudioLane>,
+    /// Sorted by `(at, lane)`.
+    pub audio: Vec<AudioPlacement>,
+}
+
+/// What the transport plays.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlayTarget {
+    Pattern(PatternId),
+    Song,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -57,6 +183,7 @@ pub struct Project {
     pub time_signature: TimeSignature,
     pub instruments: Vec<Instrument>,
     pub patterns: Vec<Pattern>,
+    pub song: Song,
 }
 
 impl Default for Project {
@@ -66,6 +193,7 @@ impl Default for Project {
             time_signature: TimeSignature::default(),
             instruments: Vec::new(),
             patterns: Vec::new(),
+            song: Song::default(),
         }
     }
 }
@@ -91,16 +219,24 @@ impl Project {
         self.patterns.iter_mut().find(|p| &p.id == id)
     }
 
-    /// Pattern length in ticks: last note end rounded up to a whole bar, minimum one bar.
+    pub fn timeline(&self, container: &Container) -> Option<&Timeline> {
+        match container {
+            Container::Pattern(id) => self.pattern(id).map(|p| &p.timeline),
+            Container::Song => Some(&self.song.timeline),
+        }
+    }
+
+    pub fn timeline_mut(&mut self, container: &Container) -> Option<&mut Timeline> {
+        match container {
+            Container::Pattern(id) => self.pattern_mut(id).map(|p| &mut p.timeline),
+            Container::Song => Some(&mut self.song.timeline),
+        }
+    }
+
+    /// Pattern length in ticks: its last block's end rounded up to a whole bar, minimum one bar.
     pub fn pattern_length(&self, id: &PatternId) -> Tick {
         let bar = self.time_signature.ticks_per_bar();
-        let last_end = self
-            .pattern(id)
-            .into_iter()
-            .flat_map(|p| p.notes.values().flatten())
-            .map(Note::end)
-            .max()
-            .unwrap_or(0);
-        last_end.div_ceil(bar).max(1) * bar
+        let end = self.pattern(id).map_or(0, |p| p.timeline.end());
+        end.div_ceil(bar).max(1) * bar
     }
 }

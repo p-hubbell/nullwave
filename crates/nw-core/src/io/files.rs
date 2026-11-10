@@ -1,19 +1,32 @@
 use crate::edit::DocPath;
-use crate::model::{Instrument, InstrumentId, Note, Pattern, PatternId, Project};
-use crate::time::TimeSignature;
+use crate::model::{
+    AudioLane, AudioPlacement, Clip, ClipKey, ClipRef, Container, Instrument, InstrumentId, Note, Pattern,
+    PatternId, PatternPlacement, Placement, Project, Song, Timeline,
+};
+use crate::time::{Tick, TimeSignature};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::hash::{DefaultHasher, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// The layout this version writes: clips and placements (v1 had one note file per
+/// pattern and instrument, and no `format` field).
+const FORMAT: u32 = 2;
+
 #[derive(Serialize, Deserialize)]
 struct SongFile {
+    #[serde(default)]
+    format: u32,
     tempo: f64,
     time_signature: TimeSignature,
     instruments: Vec<InstrumentId>,
-    patterns: Vec<PatternEntry>,
+    /// v1 called this `patterns`. Writing it under a new name makes the first version
+    /// refuse v2 projects (missing field) instead of opening them empty and then deleting
+    /// their clip files on save.
+    #[serde(alias = "patterns")]
+    pattern_order: Vec<PatternEntry>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -23,8 +36,36 @@ struct PatternEntry {
 }
 
 #[derive(Serialize, Deserialize)]
+struct PatternFile {
+    placements: Vec<Placement>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ClipFile {
+    start: Tick,
+    length: Tick,
+    notes: Vec<Note>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ArrangementFile {
+    patterns: Vec<PatternPlacement>,
+    clips: Vec<Placement>,
+    audio_lanes: Vec<AudioLane>,
+    audio: Vec<AudioPlacement>,
+}
+
+/// v1: the notes of one instrument in one pattern.
+#[derive(Serialize, Deserialize)]
 struct NoteFile {
     notes: Vec<Note>,
+}
+
+fn container_dir(c: &Container) -> PathBuf {
+    match c {
+        Container::Pattern(p) => Path::new("patterns").join(&p.0),
+        Container::Song => PathBuf::from("song"),
+    }
 }
 
 impl DocPath {
@@ -33,11 +74,17 @@ impl DocPath {
         match self {
             DocPath::Song => PathBuf::from("song.ron"),
             DocPath::Instrument(i) => Path::new("instruments").join(format!("{}.ron", i.0)),
-            DocPath::Notes(p, i) => {
-                Path::new("patterns").join(&p.0).join(format!("{}.ron", i.0))
-            }
+            DocPath::PatternLayout(p) => Path::new("patterns").join(&p.0).join("pattern.ron"),
+            DocPath::Arrangement => Path::new("song").join("arrangement.ron"),
+            DocPath::Clip(r) => container_dir(&r.container)
+                .join("clips")
+                .join(format!("{}-{}.ron", r.key.instrument.0, r.key.number)),
         }
     }
+}
+
+fn v1_notes_path(pattern: &PatternId, instrument: &InstrumentId) -> PathBuf {
+    Path::new("patterns").join(&pattern.0).join(format!("{}.ron", instrument.0))
 }
 
 #[derive(Debug)]
@@ -67,7 +114,7 @@ pub enum LoadError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LoadWarning {
-    /// A file under `instruments/` or `patterns/` that `song.ron` does not reference.
+    /// A file under `instruments/`, `patterns/` or `song/` that the project does not reference.
     OrphanFile(PathBuf),
 }
 
@@ -96,13 +143,21 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     })
 }
 
+fn clip_docs(c: &Container, t: &Timeline, docs: &mut Vec<(DocPath, String)>) {
+    for clip in &t.clips {
+        let file = ClipFile { start: clip.start, length: clip.length, notes: clip.notes.clone() };
+        docs.push((DocPath::Clip(ClipRef { container: c.clone(), key: clip.key.clone() }), to_ron(&file)));
+    }
+}
+
 pub fn save_project(dir: &Path, project: &Project) -> Result<SaveReport, SaveError> {
     let mut docs: Vec<(DocPath, String)> = Vec::new();
     let song = SongFile {
+        format: FORMAT,
         tempo: project.tempo,
         time_signature: project.time_signature,
         instruments: project.instruments.iter().map(|i| i.id.clone()).collect(),
-        patterns: project
+        pattern_order: project
             .patterns
             .iter()
             .map(|p| PatternEntry { id: p.id.clone(), name: p.name.clone() })
@@ -113,13 +168,19 @@ pub fn save_project(dir: &Path, project: &Project) -> Result<SaveReport, SaveErr
         docs.push((DocPath::Instrument(inst.id.clone()), to_ron(inst)));
     }
     for pat in &project.patterns {
-        for (inst, notes) in &pat.notes {
-            if !notes.is_empty() {
-                let file = NoteFile { notes: notes.clone() };
-                docs.push((DocPath::Notes(pat.id.clone(), inst.clone()), to_ron(&file)));
-            }
-        }
+        let layout = PatternFile { placements: pat.timeline.placements.clone() };
+        docs.push((DocPath::PatternLayout(pat.id.clone()), to_ron(&layout)));
+        clip_docs(&Container::Pattern(pat.id.clone()), &pat.timeline, &mut docs);
     }
+    let s = &project.song;
+    let arrangement = ArrangementFile {
+        patterns: s.patterns.clone(),
+        clips: s.timeline.placements.clone(),
+        audio_lanes: s.audio_lanes.clone(),
+        audio: s.audio.clone(),
+    };
+    docs.push((DocPath::Arrangement, to_ron(&arrangement)));
+    clip_docs(&Container::Song, &s.timeline, &mut docs);
 
     let err = |path: &Path, e: io::Error| SaveError { path: path.to_path_buf(), message: e.to_string() };
     fs::create_dir_all(dir).map_err(|e| err(dir, e))?;
@@ -130,7 +191,7 @@ pub fn save_project(dir: &Path, project: &Project) -> Result<SaveReport, SaveErr
         written.insert(path, hash_bytes(text.as_bytes()));
     }
 
-    for sub in ["instruments", "patterns"] {
+    for sub in ["instruments", "patterns", "song"] {
         remove_stale(&dir.join(sub), &written).map_err(|e| err(&dir.join(sub), e))?;
     }
 
@@ -212,6 +273,103 @@ fn validate_notes(rel: &Path, notes: &[Note]) -> Result<(), LoadError> {
     Ok(())
 }
 
+fn sorted_notes(mut notes: Vec<Note>) -> Vec<Note> {
+    notes.sort_by_key(|n| (n.start, n.pitch));
+    notes
+}
+
+/// Reads every clip the placements refer to, after checking their instruments exist.
+fn load_timeline(
+    dir: &Path,
+    container: &Container,
+    layout_rel: &Path,
+    placements: Vec<Placement>,
+    instruments: &HashSet<&InstrumentId>,
+    known: &mut HashSet<PathBuf>,
+) -> Result<Timeline, LoadError> {
+    let mut keys: BTreeSet<ClipKey> = BTreeSet::new();
+    for p in &placements {
+        if !instruments.contains(&p.clip.instrument) {
+            return Err(invalid(layout_rel, format!("unknown instrument \"{}\"", p.clip.instrument.0)));
+        }
+        keys.insert(p.clip.clone());
+    }
+    let mut clips = Vec::new();
+    for key in keys {
+        let rel = DocPath::Clip(ClipRef { container: container.clone(), key: key.clone() }).relative_path();
+        known.insert(dir.join(&rel));
+        let file: ClipFile = read_doc(dir, &rel)?;
+        if file.length == 0 {
+            return Err(invalid(&rel, "clip length must be greater than 0"));
+        }
+        validate_notes(&rel, &file.notes)?;
+        clips.push(Clip { key, start: file.start, length: file.length, notes: sorted_notes(file.notes) });
+    }
+    let mut placements = placements;
+    placements.sort_by_key(|p| (p.at, p.clip.clone()));
+    Ok(Timeline { clips, placements })
+}
+
+/// v1 pattern: each instrument's notes become clip 1, as long as the whole v1 pattern
+/// (last note end rounded up to a bar, minimum one bar), placed at 0.
+fn load_v1_pattern(
+    dir: &Path,
+    entry: &PatternEntry,
+    instruments: &[InstrumentId],
+    bar: Tick,
+    known: &mut HashSet<PathBuf>,
+) -> Result<Timeline, LoadError> {
+    let mut found = Vec::new();
+    for id in instruments {
+        let rel = v1_notes_path(&entry.id, id);
+        let abs = dir.join(&rel);
+        known.insert(abs.clone());
+        let exists = abs.try_exists().map_err(|e| LoadError::Io { path: rel.clone(), message: e.to_string() })?;
+        if !exists {
+            continue;
+        }
+        let file: NoteFile = read_doc(dir, &rel)?;
+        validate_notes(&rel, &file.notes)?;
+        if !file.notes.is_empty() {
+            found.push((id.clone(), file.notes));
+        }
+    }
+    let end = found.iter().flat_map(|(_, n)| n.iter().map(Note::end)).max().unwrap_or(0);
+    let length = end.div_ceil(bar).max(1) * bar;
+    let mut t = Timeline::default();
+    for (instrument, notes) in found {
+        let key = ClipKey { instrument, number: 1 };
+        t.placements.push(Placement { clip: key.clone(), at: 0 });
+        t.clips.push(Clip { key, start: 0, length, notes: sorted_notes(notes) });
+    }
+    t.clips.sort_by(|a, b| a.key.cmp(&b.key));
+    t.placements.sort_by_key(|p| (p.at, p.clip.clone()));
+    Ok(t)
+}
+
+fn validate_arrangement(
+    rel: &Path,
+    a: &ArrangementFile,
+    patterns: &HashSet<&PatternId>,
+) -> Result<(), LoadError> {
+    for pp in &a.patterns {
+        if !patterns.contains(&pp.pattern) {
+            return Err(invalid(rel, format!("unknown pattern \"{}\"", pp.pattern.0)));
+        }
+    }
+    for lane in &a.audio_lanes {
+        if !(0.0..=1.0).contains(&lane.volume) {
+            return Err(invalid(rel, format!("audio lane volume {} outside 0..=1", lane.volume)));
+        }
+    }
+    for ap in &a.audio {
+        if !a.audio_lanes.iter().any(|l| l.id == ap.lane) {
+            return Err(invalid(rel, format!("unknown audio lane \"{}\"", ap.lane.0)));
+        }
+    }
+    Ok(())
+}
+
 pub fn load_project(dir: &Path) -> Result<(Project, Vec<LoadWarning>), LoadError> {
     let song_rel = DocPath::Song.relative_path();
     if !dir.join(&song_rel).is_file() {
@@ -219,6 +377,9 @@ pub fn load_project(dir: &Path) -> Result<(Project, Vec<LoadWarning>), LoadError
     }
     let song: SongFile = read_doc(dir, &song_rel)?;
     validate_song(&song_rel, &song)?;
+    if song.format > FORMAT {
+        return Err(invalid(&song_rel, format!("made by a newer Nullwave (format {})", song.format)));
+    }
 
     let mut instruments = Vec::new();
     for id in &song.instruments {
@@ -233,31 +394,41 @@ pub fn load_project(dir: &Path) -> Result<(Project, Vec<LoadWarning>), LoadError
     for id in &song.instruments {
         known.insert(dir.join(DocPath::Instrument(id.clone()).relative_path()));
     }
+    let instrument_set: HashSet<&InstrumentId> = song.instruments.iter().collect();
+    let bar = song.time_signature.ticks_per_bar();
 
     let mut patterns = Vec::new();
-    for entry in &song.patterns {
-        let mut notes = BTreeMap::new();
-        for id in &song.instruments {
-            let rel = DocPath::Notes(entry.id.clone(), id.clone()).relative_path();
-            let abs = dir.join(&rel);
-            known.insert(abs.clone());
-            let exists = abs
-                .try_exists()
-                .map_err(|e| LoadError::Io { path: rel.clone(), message: e.to_string() })?;
-            if !exists {
-                continue;
-            }
-            let file: NoteFile = read_doc(dir, &rel)?;
-            validate_notes(&rel, &file.notes)?;
-            if !file.notes.is_empty() {
-                notes.insert(id.clone(), file.notes);
-            }
-        }
-        patterns.push(Pattern { id: entry.id.clone(), name: entry.name.clone(), notes });
+    for entry in &song.pattern_order {
+        let timeline = if song.format < FORMAT {
+            load_v1_pattern(dir, entry, &song.instruments, bar, &mut known)?
+        } else {
+            let rel = DocPath::PatternLayout(entry.id.clone()).relative_path();
+            known.insert(dir.join(&rel));
+            let file: PatternFile = read_doc(dir, &rel)?;
+            let container = Container::Pattern(entry.id.clone());
+            load_timeline(dir, &container, &rel, file.placements, &instrument_set, &mut known)?
+        };
+        patterns.push(Pattern { id: entry.id.clone(), name: entry.name.clone(), timeline });
     }
 
+    let song_part = if song.format < FORMAT {
+        Song::default()
+    } else {
+        let rel = DocPath::Arrangement.relative_path();
+        known.insert(dir.join(&rel));
+        let a: ArrangementFile = read_doc(dir, &rel)?;
+        let pattern_set: HashSet<&PatternId> = song.pattern_order.iter().map(|p| &p.id).collect();
+        validate_arrangement(&rel, &a, &pattern_set)?;
+        let timeline = load_timeline(dir, &Container::Song, &rel, a.clips, &instrument_set, &mut known)?;
+        let mut patterns = a.patterns;
+        patterns.sort_by_key(|p| (p.at, p.pattern.clone()));
+        let mut audio = a.audio;
+        audio.sort_by_key(|p| (p.at, p.lane.clone()));
+        Song { timeline, patterns, audio_lanes: a.audio_lanes, audio }
+    };
+
     let mut warnings = Vec::new();
-    for sub in ["instruments", "patterns"] {
+    for sub in ["instruments", "patterns", "song"] {
         collect_orphans(&dir.join(sub), &known, &mut warnings);
     }
     warnings.sort_by(|a, b| match (a, b) {
@@ -269,6 +440,7 @@ pub fn load_project(dir: &Path) -> Result<(Project, Vec<LoadWarning>), LoadError
         time_signature: song.time_signature,
         instruments,
         patterns,
+        song: song_part,
     };
     Ok((project, warnings))
 }

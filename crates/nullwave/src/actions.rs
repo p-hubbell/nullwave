@@ -25,11 +25,11 @@ pub mod workspace {
 }
 
 pub mod project {
-    gpui::actions!(project, [New, Open, Save, NewPattern, AddSampleFolder]);
+    gpui::actions!(project, [New, Open, Save, NewPattern, AddSampleFolder, OpenSong]);
 }
 
 pub mod pattern {
-    gpui::actions!(pattern, [Rename, Delete]);
+    gpui::actions!(pattern, [Duplicate, Rename, Delete]);
 }
 
 pub mod instrument {
@@ -42,6 +42,10 @@ pub mod edit {
 
 pub mod transport {
     gpui::actions!(transport, [PlayStop]);
+}
+
+pub mod timeline {
+    gpui::actions!(timeline, [Duplicate, Delete, MakeUnique, CloseRoll]);
 }
 
 pub mod piano_roll {
@@ -84,12 +88,18 @@ pub fn action_for(id: &str) -> Option<Box<dyn Action>> {
         "project.save" => Box::new(project::Save),
         "project.new_pattern" => Box::new(project::NewPattern),
         "project.add_sample_folder" => Box::new(project::AddSampleFolder),
+        "project.open_song" => Box::new(project::OpenSong),
+        "pattern.duplicate" => Box::new(pattern::Duplicate),
         "pattern.rename" => Box::new(pattern::Rename),
         "pattern.delete" => Box::new(pattern::Delete),
         "instrument.delete" => Box::new(instrument::Delete),
         "edit.undo" => Box::new(edit::Undo),
         "edit.redo" => Box::new(edit::Redo),
         "transport.play_stop" => Box::new(transport::PlayStop),
+        "timeline.duplicate" => Box::new(timeline::Duplicate),
+        "timeline.delete" => Box::new(timeline::Delete),
+        "timeline.make_unique" => Box::new(timeline::MakeUnique),
+        "timeline.close_roll" => Box::new(timeline::CloseRoll),
         "piano_roll.delete" => Box::new(piano_roll::Delete),
         "piano_roll.select_all" => Box::new(piano_roll::SelectAll),
         "piano_roll.duplicate" => Box::new(piano_roll::Duplicate),

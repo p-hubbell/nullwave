@@ -29,8 +29,13 @@ const FRAME_EPSILON: f64 = 1e-6;
 
 pub enum Command {
     SetSnapshot(Owned<Snapshot>),
+    /// Starts the transport from the current position.
     Play,
+    /// Stops, releases every voice and returns to the start.
     Stop,
+    /// Moves the transport to `tick`, playing or not. While playing, sounding notes are
+    /// released and audio clips under the new position are picked up mid-file.
+    Seek(Tick),
     Preview(Shared<SampleBuffer>),
     /// Plays one note through instrument `instrument` of the current snapshot, as the
     /// preview voice (replacing any preview already sounding). Works while stopped.
@@ -83,13 +88,28 @@ impl EngineCore {
                 let fired_spt = self.samples_per_tick();
                 // The old snapshot's drop is deferred to the basedrop collector.
                 self.snapshot = snapshot;
-                self.position %= f64::from(self.loop_length());
+                if self.snapshot.looping {
+                    self.position %= f64::from(self.length());
+                }
                 self.cursor = self.cursor_for(self.position, fired_spt);
             }
             Command::Play => {
                 self.playing = true;
-                self.position = 0.0;
-                self.cursor = 0;
+                self.cursor = self.cursor_from(self.position);
+                self.chase();
+            }
+            Command::Seek(tick) => {
+                let length = self.length();
+                self.position = f64::from(if self.snapshot.looping { tick % length } else { tick.min(length) });
+                self.cursor = self.cursor_from(self.position);
+                if self.playing {
+                    for (i, v) in self.voices.iter_mut().enumerate() {
+                        if self.preview.is_none_or(|(p, _)| p != i) {
+                            v.release();
+                        }
+                    }
+                    self.chase();
+                }
             }
             Command::Stop => {
                 for v in &mut self.voices {
@@ -115,6 +135,7 @@ impl EngineCore {
                         ..VoiceParams::simple(PREVIEW_GAIN, 0.0, 0, self.ms_to_samples(PREVIEW_RELEASE_MS))
                     },
                     duration_samples: None,
+                    offset: 0.0,
                     age: 0,
                 };
                 self.preview = Some(self.start_voice(start));
@@ -158,8 +179,34 @@ impl EngineCore {
         self.voices.iter().filter(|v| v.is_active()).count()
     }
 
-    fn loop_length(&self) -> Tick {
-        self.snapshot.loop_length.max(1)
+    fn length(&self) -> Tick {
+        self.snapshot.length.max(1)
+    }
+
+    /// First event at or after `position` (so an event exactly there fires).
+    fn cursor_from(&self, position: f64) -> usize {
+        self.snapshot.events.partition_point(|e| f64::from(e.tick) < position)
+    }
+
+    /// Starts every chasing (audio) event that is already under way at the position,
+    /// from the matching point in its file.
+    fn chase(&mut self) {
+        let spt = self.samples_per_tick();
+        let position = self.position;
+        for i in 0..self.cursor {
+            let event = self.snapshot.events[i];
+            let into = position - f64::from(event.tick);
+            if into <= 0.0 || into >= f64::from(event.length) {
+                continue;
+            }
+            if !self.snapshot.instruments.get(event.instrument).is_some_and(|inst| inst.chase) {
+                continue;
+            }
+            if let Some(mut start) = self.note_start(event, spt) {
+                start.offset = into * spt * start.rate;
+                self.start_voice(start);
+            }
+        }
     }
 
     fn samples_per_tick(&self) -> f64 {
@@ -190,16 +237,21 @@ impl EngineCore {
     }
 
     /// Render `n <= MAX_BLOCK_FRAMES` frames into the scratch buffers, firing
-    /// events at their exact frame and wrapping at the loop end.
+    /// events at their exact frame and wrapping (or stopping) at the end.
     fn render_chunk(&mut self, n: usize) {
         if !self.playing {
             self.render_voices(0, n);
             return;
         }
         let spt = self.samples_per_tick();
-        let loop_length = self.loop_length();
+        let loop_length = self.length();
         let mut done = 0;
         while done < n {
+            if !self.snapshot.looping && self.frames_until(loop_length, spt) == 0 {
+                self.finish(loop_length);
+                self.render_voices(done, n);
+                return;
+            }
             while let Some(&event) = self.snapshot.events.get(self.cursor) {
                 if event.tick >= loop_length || self.frames_until(event.tick, spt) > 0 {
                     break;
@@ -207,7 +259,7 @@ impl EngineCore {
                 self.fire(event, spt);
                 self.cursor += 1;
             }
-            if self.wrap_at_loop_end(loop_length, spt) {
+            if self.snapshot.looping && self.wrap_at_loop_end(loop_length, spt) {
                 continue;
             }
             let to_loop_end = self.frames_until(loop_length, spt);
@@ -220,8 +272,22 @@ impl EngineCore {
             self.position += seg as f64 / spt;
             done += seg;
             // Wrap eagerly so the playhead never reports `loop_length`.
-            self.wrap_at_loop_end(loop_length, spt);
+            if self.snapshot.looping {
+                self.wrap_at_loop_end(loop_length, spt);
+            }
         }
+    }
+
+    /// Play-once reached its end: release the song's notes and stop there.
+    fn finish(&mut self, length: Tick) {
+        // A sample preview from the sidebar is not part of the song; let it ring.
+        for (i, v) in self.voices.iter_mut().enumerate() {
+            if self.preview.is_none_or(|(p, _)| p != i) {
+                v.release();
+            }
+        }
+        self.playing = false;
+        self.position = f64::from(length);
     }
 
     /// Wrap to the loop start if the loop end has been reached. Returns whether it wrapped.
@@ -343,6 +409,7 @@ impl EngineCore {
             ),
             params: self.voice_params(inst, event.velocity),
             duration_samples: held.then(|| (f64::from(event.length) * spt).round() as u64),
+            offset: 0.0,
             age: 0,
         })
     }
