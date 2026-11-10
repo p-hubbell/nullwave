@@ -22,7 +22,11 @@ struct SongFile {
     tempo: f64,
     time_signature: TimeSignature,
     instruments: Vec<InstrumentId>,
-    patterns: Vec<PatternEntry>,
+    /// v1 called this `patterns`. Writing it under a new name makes the first version
+    /// refuse v2 projects (missing field) instead of opening them empty and then deleting
+    /// their clip files on save.
+    #[serde(alias = "patterns")]
+    pattern_order: Vec<PatternEntry>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -153,7 +157,7 @@ pub fn save_project(dir: &Path, project: &Project) -> Result<SaveReport, SaveErr
         tempo: project.tempo,
         time_signature: project.time_signature,
         instruments: project.instruments.iter().map(|i| i.id.clone()).collect(),
-        patterns: project
+        pattern_order: project
             .patterns
             .iter()
             .map(|p| PatternEntry { id: p.id.clone(), name: p.name.clone() })
@@ -394,7 +398,7 @@ pub fn load_project(dir: &Path) -> Result<(Project, Vec<LoadWarning>), LoadError
     let bar = song.time_signature.ticks_per_bar();
 
     let mut patterns = Vec::new();
-    for entry in &song.patterns {
+    for entry in &song.pattern_order {
         let timeline = if song.format < FORMAT {
             load_v1_pattern(dir, entry, &song.instruments, bar, &mut known)?
         } else {
@@ -413,7 +417,7 @@ pub fn load_project(dir: &Path) -> Result<(Project, Vec<LoadWarning>), LoadError
         let rel = DocPath::Arrangement.relative_path();
         known.insert(dir.join(&rel));
         let a: ArrangementFile = read_doc(dir, &rel)?;
-        let pattern_set: HashSet<&PatternId> = song.patterns.iter().map(|p| &p.id).collect();
+        let pattern_set: HashSet<&PatternId> = song.pattern_order.iter().map(|p| &p.id).collect();
         validate_arrangement(&rel, &a, &pattern_set)?;
         let timeline = load_timeline(dir, &Container::Song, &rel, a.clips, &instrument_set, &mut known)?;
         let mut patterns = a.patterns;

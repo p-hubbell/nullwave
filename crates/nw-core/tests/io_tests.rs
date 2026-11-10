@@ -332,3 +332,30 @@ fn v1_sounds_the_same() {
     let kicks: Vec<Tick> = flat.iter().filter(|n| n.instrument == id("kick")).map(|n| n.tick).collect();
     assert_eq!(kicks, vec![0, 1920, 3840]);
 }
+
+/// The first version's `song.ron` shape. A v2 file must not parse as it, so the first
+/// version refuses a v2 project instead of opening it empty and deleting its clips on save.
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct V1SongFile {
+    tempo: f64,
+    time_signature: TimeSignature,
+    instruments: Vec<InstrumentId>,
+    patterns: Vec<V1PatternEntry>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct V1PatternEntry {
+    id: PatternId,
+    name: String,
+}
+
+#[test]
+fn first_version_refuses_a_v2_song_file() {
+    let (t, _) = saved();
+    let text = fs::read_to_string(t.path().join("song.ron")).unwrap();
+    assert!(ron::from_str::<V1SongFile>(&text).is_err(), "v1 would open this:\n{text}");
+    let v1 = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-project/song.ron")).unwrap();
+    assert!(ron::from_str::<V1SongFile>(&v1).is_ok(), "the shape above matches v1");
+}
