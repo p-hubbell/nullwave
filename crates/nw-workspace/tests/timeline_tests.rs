@@ -100,7 +100,7 @@ fn hits_in_priority_order() {
     let p = project();
     let song = Container::Song;
     let blocks = blocks(&p, &song, &audio_len);
-    let index_of = |pred: &dyn Fn(&Block) -> bool| blocks.iter().position(|b| pred(b)).unwrap();
+    let index_of = |pred: &dyn Fn(&Block) -> bool| blocks.iter().position(pred).unwrap();
     // Ruler and headers.
     assert_eq!(hit(&p, &song, 150.0, 5.0), TimelineHit::Ruler(500));
     assert_eq!(hit(&p, &song, 50.0, 70.0), TimelineHit::Header(1));
